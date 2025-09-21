@@ -1,0 +1,7 @@
+# Additional dependencies for Discord bot server
+# Add these to your existing requirements.txt
+
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+discord.py>=2.3.2
+python-multipart>=0.0.6
