@@ -76,7 +76,7 @@ Perfect for students who need to manage a **large library of lectures**, HootHiv
 
 ### 2. Installation
 ``
-# Clone repository
+# Clone repository - The final_branch
 git clone https://github.com/notzabir/Hack_Rice.git
 
 cd Hack_Rice-final_branch
