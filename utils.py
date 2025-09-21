@@ -7,6 +7,8 @@ import io
 import m3u8
 from urllib.parse import urljoin
 import yt_dlp
+import json
+import re
 
 # Load environment variables
 load_dotenv()
@@ -796,6 +798,147 @@ def generate_open_analysis(client, video_id, prompt, temperature=0.3, streaming=
         
     except Exception as e:
         raise Exception(f"Error performing open-ended analysis: {str(e)}")
+
+
+# ---- Advanced Feature Helpers: Topics, Entities, and Follow-up Q&A ----
+
+def _extract_json_from_text(text):
+    """
+    Best-effort JSON extraction from model output. Returns Python object or None.
+    """
+    if not text:
+        return None
+    # Try direct JSON first
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    # Fallback: find first {...} block
+    match = re.search(r"\{[\s\S]*\}", text)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            return None
+    # Fallback: find [...] array
+    match = re.search(r"\[[\s\S]*\]", text)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            return None
+    return None
+
+
+def generate_topics(client, video_id, max_topics=10, temperature=0.2):
+    """
+    Extract key topics from a video using TwelveLabs analyze API with a structured prompt.
+    Returns a dict with a list of topics and metadata.
+    """
+    prompt = f"""
+    You are extracting concise key TOPICS from a video. Analyze the entire content and output STRICT JSON.
+    JSON schema:
+    {{
+      "topics": [
+        {{
+          "name": "string",            // short title of topic
+          "salience": 0.0,              // 0-1 relevance score
+          "occurrences": 0,             // number of mentions/scenes
+          "first_sec": 0,               // first second where topic appears
+          "last_sec": 0,                // last second where topic appears
+          "keywords": ["string"]       // a few related keywords
+        }}
+      ]
+    }}
+    Rules:
+    - Return ONLY JSON. No prose.
+    - Limit to {max_topics} top topics.
+    """
+    result = generate_open_analysis(client, video_id, prompt, temperature=temperature, streaming=False)
+    data = _extract_json_from_text(result.get('analysis')) or {"topics": []}
+    # Normalize types
+    topics = []
+    for t in data.get("topics", []):
+        topics.append({
+            "name": t.get("name") or "Unknown",
+            "salience": float(t.get("salience", 0.0)),
+            "occurrences": int(t.get("occurrences", 0)),
+            "first_sec": float(t.get("first_sec", 0)),
+            "last_sec": float(t.get("last_sec", 0)),
+            "keywords": t.get("keywords", [])[:5],
+        })
+    topics.sort(key=lambda x: x["salience"], reverse=True)
+    return {"topics": topics, "video_id": video_id}
+
+
+def generate_entities(client, video_id, temperature=0.2):
+    """
+    Extract named entities (people, organizations, places, products) from a video.
+    Returns a dict with categorized entities.
+    """
+    prompt = """
+    Extract NAMED ENTITIES from the video and output STRICT JSON only.
+    Categories: person, organization, place, product, other.
+    JSON schema:
+    {
+      "entities": [
+        {
+          "name": "string",
+          "type": "person|organization|place|product|other",
+          "mentions": 0,
+          "confidence": 0.0,
+          "first_sec": 0,
+          "last_sec": 0
+        }
+      ]
+    }
+    Rules: Return ONLY JSON, no extra text.
+    """
+    result = generate_open_analysis(client, video_id, prompt, temperature=temperature, streaming=False)
+    data = _extract_json_from_text(result.get('analysis')) or {"entities": []}
+    entities = []
+    for e in data.get("entities", []):
+        ent_type = (e.get("type") or "other").lower()
+        if ent_type not in {"person", "organization", "place", "product", "other"}:
+            ent_type = "other"
+        entities.append({
+            "name": e.get("name") or "Unknown",
+            "type": ent_type,
+            "mentions": int(e.get("mentions", 0)),
+            "confidence": float(e.get("confidence", 0.0)),
+            "first_sec": float(e.get("first_sec", 0)),
+            "last_sec": float(e.get("last_sec", 0)),
+        })
+    # Sort by confidence then mentions
+    entities.sort(key=lambda x: (x["confidence"], x["mentions"]), reverse=True)
+    return {"entities": entities, "video_id": video_id}
+
+
+def rewrite_followup_query(client, video_id, chat_history, followup_text, temperature=0.2):
+    """
+    Rewrites a follow-up question into a standalone query using conversation context.
+    chat_history: list of {"role": "user|assistant", "content": "..."}
+    Returns a dict {"query": "..."}
+    """
+    # If no video_id context is available, return the follow-up as-is
+    if not video_id:
+        return {"query": followup_text}
+
+    # Build a compact conversation context (last 6 turns max)
+    history_tail = chat_history[-6:] if chat_history else []
+    convo = "\n".join([f"{m['role']}: {m['content']}" for m in history_tail])
+    prompt = f"""
+    You're a helpful assistant that converts a follow-up question into a standalone query.
+    Conversation so far:\n{convo}\n
+    Follow-up: {followup_text}
+
+    Output STRICT JSON: {{"query": "<standalone rewritten query>"}}
+    Only return JSON. No extra text.
+    """
+    result = generate_open_analysis(client, video_id, prompt, temperature=temperature, streaming=False)
+    data = _extract_json_from_text(result.get('analysis')) or {}
+    query = data.get("query") or followup_text
+    return {"query": query}
 
 
 def create_contextual_snippet_analysis(client, video_id, start_time, end_time, query):
