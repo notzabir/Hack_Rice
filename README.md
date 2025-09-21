@@ -62,7 +62,7 @@ Perfect for students who need to manage a **large library of lectures**, HootHiv
 - **Video Processing**: MoviePy  
 - **Backend**: Python (FastAPI optional for batch APIs)  
 - **Config**: dotenv for environment variables  
-- **Integrations**: Discord.py (HootBot), MongoDB Atlas (lecture metadata & indexing), AWS/GCP storage  
+- **Integrations**: Discord.py (HootBot), AWS/GCP storage  
 
 ---
 
@@ -73,14 +73,13 @@ Perfect for students who need to manage a **large library of lectures**, HootHiv
 - TwelveLabs account + API key  
 - Git  
 - (Optional) Discord bot token for HootBot  
-- (Optional) MongoDB Atlas for persistent lecture storage  
 
 ### 2. Installation
 ``
 # Clone repository
 git clone https://github.com/notzabir/Hack_Rice.git
 
-cd HootHive-Lecture-QA
+cd Hack_Rice-final_branch
 
 # Install dependencies
 pip install -r requirements.txt
@@ -118,7 +117,7 @@ Step 2 -
 Install dependencies:
 
 ```bash
- cd Hack_Rice
+ cd Hack_Rice-final_branch
 
  pip install -r requirements.txt
 ```
@@ -150,6 +149,7 @@ cp .env.example .env
 
 ```env
 API_KEY=your_twelvelabs_api_key_here
+or TWELVE_LABS_API_KEY=your_twelvelabs_api_key_here
 INDEX_ID=your_index_id_here
 ```
 
@@ -162,6 +162,14 @@ Run the Streamlit application
 ```bash
   streamlit run app.py
 ```
+
+Run the Discord Bot Server
+
+```bash
+  python discord_bot_server.py 
+```
+
+
 
 Step 7 -
 
