@@ -41,6 +41,7 @@ def mmss_to_seconds(mmss):
     minutes, seconds = map(int, mmss.split(':'))
     return minutes * 60 + seconds
 
+# Utility function to generate timestamps using TwelveLabs summarize API
 def generate_timestamps(client, video_id, start_time=0):
     try:
         gist = client.summarize(video_id=video_id, type="chapter")

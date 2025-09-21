@@ -267,7 +267,7 @@ Step 6 -
 Run the Streamlit application
 
 ```bash
-  streamlit run app.py
+  python3 -m streamlit run app.py
 ```
 
 Step 7 -
