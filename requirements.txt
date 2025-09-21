@@ -5,3 +5,5 @@ requests
 python-dotenv
 m3u8
 yt_dlp
+streamlit-auth0-component
+python-jose

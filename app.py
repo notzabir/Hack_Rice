@@ -1,9 +1,11 @@
 import streamlit as st
 import tempfile
 import os
+from datetime import datetime
 from twelvelabs import TwelveLabs
+import streamlit_auth0_component as sac
+from auth_config import AUTH0_DOMAIN, AUTH0_CLIENT_ID
 
-# Try to import utils and handle configuration errors
 try:
     from utils import (
         API_KEY, process_video, fetch_existing_videos,
@@ -25,63 +27,433 @@ except Exception as e:
 
 import uuid 
 
-# Set up the Streamlit page configuration
-st.set_page_config(page_title="YouTube Chapter Timestamp Generator", layout="wide")
+def log_error(error_type, error_message, context=None, recovery_suggestions=None):
+    error_entry = {
+        'timestamp': st.session_state.get('current_time', 'unknown'),
+        'type': error_type,
+        'message': error_message,
+        'context': context,
+        'recovery_suggestions': recovery_suggestions or []
+    }
+    st.session_state.error_log.append(error_entry)
+    st.session_state.last_error = error_entry
+    return error_entry
 
-# Custom CSS
+def display_enhanced_error(error_type, error_message, recovery_suggestions=None):
+    st.error(f"Error: {error_type} - {error_message}")
+    
+    if recovery_suggestions:
+        with st.expander("Troubleshooting & Recovery Options"):
+            for i, suggestion in enumerate(recovery_suggestions, 1):
+                st.write(f"{i}. {suggestion}")
+    
+    log_error(error_type, error_message, recovery_suggestions=recovery_suggestions)
+
+def get_recovery_suggestions(error_type):
+    suggestions = {
+        'upload_error': [
+            "Check if the video file is not corrupted",
+            "Ensure the video format is supported (MP4, AVI, MOV)",
+            "Verify the video file size is under 1GB",
+            "Try uploading a smaller video segment first",
+            "Check your internet connection"
+        ],
+        'api_error': [
+            "Check your TwelveLabs API key in the .env file",
+            "Verify your INDEX_ID is correct",
+            "Ensure you have sufficient API credits",
+            "Try refreshing the page",
+            "Contact support if the issue persists"
+        ],
+        'processing_error': [
+            "Wait a few minutes and try again",
+            "Check if the video is still being processed",
+            "Try with a shorter video",
+            "Verify your internet connection",
+            "Clear browser cache and reload"
+        ],
+        'search_error': [
+            "Wait for video indexing to complete",
+            "Try a different search query",
+            "Check if the video was uploaded successfully",
+            "Refresh the page and try again"
+        ]
+    }
+    return suggestions.get(error_type, ["Try refreshing the page", "Contact support if the issue persists"])
+
+def format_timestamps_for_youtube(timestamps):
+    if not timestamps:
+        return ""
+    
+    lines = timestamps.strip().split('\n')
+    youtube_format = []
+    
+    for line in lines:
+        if '-' in line:
+            time_part, title_part = line.split('-', 1)
+            time_part = time_part.strip()
+            title_part = title_part.strip()
+            youtube_format.append(f"{time_part} - {title_part}")
+    
+    return '\n'.join(youtube_format)
+
+def export_to_json(data, filename="export"):
+    import json
+    from datetime import datetime
+    
+    export_data = {
+        'export_timestamp': datetime.now().isoformat(),
+        'video_id': st.session_state.get('video_id'),
+        'timestamps': st.session_state.get('timestamps'),
+        'qa_results': data.get('qa_results', []),
+        'chapters': data.get('chapters', []),
+        'highlights': data.get('highlights', [])
+    }
+    
+    return json.dumps(export_data, indent=2)
+
+def export_to_csv(data, filename="export"):
+    import csv
+    import io
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    writer.writerow(['Type', 'Timestamp', 'Title/Query', 'Content', 'Confidence'])
+    
+    if st.session_state.get('timestamps'):
+        for line in st.session_state.timestamps.split('\n'):
+            if '-' in line:
+                time_part, title_part = line.split('-', 1)
+                writer.writerow(['Timestamp', time_part.strip(), title_part.strip(), '', ''])
+    
+    for result in data.get('qa_results', []):
+        writer.writerow([
+            'QA Result', 
+            f"{result.get('start', '')}-{result.get('end', '')}", 
+            result.get('query', ''), 
+            result.get('text', ''), 
+            result.get('confidence', '')
+        ])
+    
+    return output.getvalue()
+
+def create_export_button(data, export_type="youtube", label="Export"):
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        if export_type == "youtube":
+            content = format_timestamps_for_youtube(st.session_state.get('timestamps', ''))
+            st.text_area("YouTube Format (Copy this to your video description):", 
+                        value=content, height=100, key=f"export_youtube_{uuid.uuid4()}")
+        elif export_type == "json":
+            content = export_to_json(data)
+            st.text_area("JSON Export:", value=content, height=200, key=f"export_json_{uuid.uuid4()}")
+        elif export_type == "csv":
+            content = export_to_csv(data)
+            st.text_area("CSV Export:", value=content, height=200, key=f"export_csv_{uuid.uuid4()}")
+    
+    with col2:
+        if st.button(f"Copy {export_type.upper()}", key=f"copy_{export_type}_{uuid.uuid4()}"):
+            st.components.v1.html(f"""
+                <script>
+                navigator.clipboard.writeText(`{content.replace('`', '\\`')}`).then(function() {{
+                    console.log('Copied to clipboard!');
+                }});
+                </script>
+            """, height=0)
+            st.success(f"Copied {export_type.upper()} format to clipboard!")
+            
+            st.session_state.export_history.append({
+                'timestamp': str(datetime.now()),
+                'type': export_type,
+                'video_id': st.session_state.get('video_id')
+            })
+    
+    with col3:
+        if export_type == "json":
+            st.download_button(
+                label=f"Download JSON",
+                data=content,
+                file_name=f"video_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                key=f"download_json_{uuid.uuid4()}"
+            )
+        elif export_type == "csv":
+            st.download_button(
+                label=f"Download CSV",
+                data=content,
+                file_name=f"video_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                key=f"download_csv_{uuid.uuid4()}"
+            ) 
+
+def log_error(error_type, error_message, context=None, recovery_suggestions=None):
+    error_entry = {
+        'timestamp': st.session_state.get('current_time', 'unknown'),
+        'type': error_type,
+        'message': error_message,
+        'context': context,
+        'recovery_suggestions': recovery_suggestions or []
+    }
+    st.session_state.error_log.append(error_entry)
+    st.session_state.last_error = error_entry
+    return error_entry
+
+def display_enhanced_error(error_type, error_message, recovery_suggestions=None):
+    st.error(f"Error: {error_type} - {error_message}")
+    
+    if recovery_suggestions:
+        with st.expander("Troubleshooting & Recovery Options"):
+            for i, suggestion in enumerate(recovery_suggestions, 1):
+                st.write(f"{i}. {suggestion}")
+    
+    log_error(error_type, error_message, recovery_suggestions=recovery_suggestions)
+
+def get_recovery_suggestions(error_type):
+    suggestions = {
+        'upload_error': [
+            "Check if the video file is not corrupted",
+            "Ensure the video format is supported (MP4, AVI, MOV)",
+            "Verify the video file size is under 1GB",
+            "Try uploading a smaller video segment first",
+            "Check your internet connection"
+        ],
+        'api_error': [
+            "Check your TwelveLabs API key in the .env file",
+            "Verify your INDEX_ID is correct",
+            "Ensure you have sufficient API credits",
+            "Try refreshing the page",
+            "Contact support if the issue persists"
+        ],
+        'processing_error': [
+            "Wait a few minutes and try again",
+            "Check if the video is still being processed",
+            "Try with a shorter video",
+            "Verify your internet connection",
+            "Clear browser cache and reload"
+        ],
+        'search_error': [
+            "Wait for video indexing to complete",
+            "Try a different search query",
+            "Check if the video was uploaded successfully",
+            "Refresh the page and try again"
+        ]
+    }
+    return suggestions.get(error_type, ["Try refreshing the page", "Contact support if the issue persists"])
+
+def format_timestamps_for_youtube(timestamps):
+    if not timestamps:
+        return ""
+    
+    lines = timestamps.strip().split('\n')
+    youtube_format = []
+    
+    for line in lines:
+        if '-' in line:
+            time_part, title_part = line.split('-', 1)
+            time_part = time_part.strip()
+            title_part = title_part.strip()
+            youtube_format.append(f"{time_part} - {title_part}")
+    
+    return '\n'.join(youtube_format)
+
+def export_to_json(data, filename="export"):
+    import json
+    from datetime import datetime
+    
+    export_data = {
+        'export_timestamp': datetime.now().isoformat(),
+        'video_id': st.session_state.get('video_id'),
+        'timestamps': st.session_state.get('timestamps'),
+        'qa_results': data.get('qa_results', []),
+        'chapters': data.get('chapters', []),
+        'highlights': data.get('highlights', [])
+    }
+    
+    return json.dumps(export_data, indent=2)
+
+def export_to_csv(data, filename="export"):
+    import csv
+    import io
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    writer.writerow(['Type', 'Timestamp', 'Title/Query', 'Content', 'Confidence'])
+    
+    if st.session_state.get('timestamps'):
+        for line in st.session_state.timestamps.split('\n'):
+            if '-' in line:
+                time_part, title_part = line.split('-', 1)
+                writer.writerow(['Timestamp', time_part.strip(), title_part.strip(), '', ''])
+    
+    for result in data.get('qa_results', []):
+        writer.writerow([
+            'QA Result', 
+            f"{result.get('start', '')}-{result.get('end', '')}", 
+            result.get('query', ''), 
+            result.get('text', ''), 
+            result.get('confidence', '')
+        ])
+    
+    return output.getvalue()
+
+def create_export_button(data, export_type="youtube", label="Export"):
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        if export_type == "youtube":
+            content = format_timestamps_for_youtube(st.session_state.get('timestamps', ''))
+            st.text_area("YouTube Format (Copy this to your video description):", 
+                        value=content, height=100, key=f"export_youtube_{uuid.uuid4()}")
+        elif export_type == "json":
+            content = export_to_json(data)
+            st.text_area("JSON Export:", value=content, height=200, key=f"export_json_{uuid.uuid4()}")
+        elif export_type == "csv":
+            content = export_to_csv(data)
+            st.text_area("CSV Export:", value=content, height=200, key=f"export_csv_{uuid.uuid4()}")
+    
+    with col2:
+        if st.button(f"Copy {export_type.upper()}", key=f"copy_{export_type}_{uuid.uuid4()}"):
+            st.components.v1.html(f"""
+                <script>
+                navigator.clipboard.writeText(`{content.replace('`', '\\`')}`).then(function() {{
+                    console.log('Copied to clipboard!');
+                }});
+                </script>
+            """, height=0)
+            st.success(f"Copied {export_type.upper()} format to clipboard!")
+            
+            st.session_state.export_history.append({
+                'timestamp': str(datetime.now()),
+                'type': export_type,
+                'video_id': st.session_state.get('video_id')
+            })
+    
+    with col3:
+        if export_type == "json":
+            st.download_button(
+                label=f"Download JSON",
+                data=content,
+                file_name=f"video_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                key=f"download_json_{uuid.uuid4()}"
+            )
+        elif export_type == "csv":
+            st.download_button(
+                label=f"Download CSV",
+                data=content,
+                file_name=f"video_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                key=f"download_csv_{uuid.uuid4()}"
+            ) 
+
+st.set_page_config(
+    page_title="🎬 HootQnA - AI Video Analysis Platform", 
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+def load_css(file_name):
+    with open(file_name) as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+load_css("style.css")
+
 st.markdown("""
-<style>
-[data-testid="stAppViewContainer"] {
-    background-image: url("https://cdn.pixabay.com/photo/2021/08/02/22/41/background-6517956_640.jpg");
-    background-size: cover;
-}
-[data-testid="stHeader"] {
-    background-color: rgba(0,0,0,0);
-}
-[data-testid="stToolbar"] {
-    right: 2rem;
-    background-image: url("");
-    background-size: cover;
-}
-</style>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
 """, unsafe_allow_html=True)
 
 # Streamlit Page Header
-st.markdown("<h2 style='text-align: center;'>HootQnA: Chat with Videos ✍🤖</h2>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color: #666;'>Generate timestamps, create video segments, and ask questions about your videos!</p>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center; color: #f8fafc; font-weight: 600;'>HootQnA AI Video Analysis Platform</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #666; font-size: 18px; margin-bottom: 2rem;'>Advanced video processing, timestamp generation, and intelligent content analysis</p>", unsafe_allow_html=True)
+
+# Keyboard shortcuts help
+with st.expander("Keyboard Shortcuts", expanded=False):
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("""
+        **Navigation:**
+        - `Ctrl + U` - Upload tab
+        - `Ctrl + Q` - Q&A tab
+        - `Ctrl + S` - Focus search
+        """)
+    with col2:
+        st.markdown("""
+        **Actions:**
+        - `Ctrl + E` - Export timestamps
+        - `Esc` - Clear search
+        - `F5` - Refresh page
+        """)
+
 st.markdown("---")
 
+# Initialize session state with progress persistence
+def initialize_session_state():
+    """Initialize session state with enhanced progress persistence."""
+    # Core video data
+    if 'timestamps' not in st.session_state:
+        st.session_state.timestamps = None
+    if 'video_id' not in st.session_state:
+        st.session_state.video_id = None
+    if 'video_segments' not in st.session_state:
+        st.session_state.video_segments = []
+    if 'video_url' not in st.session_state:
+        st.session_state.video_url = None
+    if 'qa_results' not in st.session_state:
+        st.session_state.qa_results = []
+    if 'qa_snippets' not in st.session_state:
+        st.session_state.qa_snippets = []
+    if 'chapters_result' not in st.session_state:
+        st.session_state.chapters_result = None
+    if 'highlights_result' not in st.session_state:
+        st.session_state.highlights_result = None
+    if 'chapter_snippets' not in st.session_state:
+        st.session_state.chapter_snippets = []
+    if 'highlight_snippets' not in st.session_state:
+        st.session_state.highlight_snippets = []
+    
+    # Progress persistence
+    if 'processing_status' not in st.session_state:
+        st.session_state.processing_status = {}
+    if 'last_upload_info' not in st.session_state:
+        st.session_state.last_upload_info = None
+    if 'video_metadata' not in st.session_state:
+        st.session_state.video_metadata = {}
+    if 'search_history' not in st.session_state:
+        st.session_state.search_history = []
+    if 'export_history' not in st.session_state:
+        st.session_state.export_history = []
+    
+    # Batch operations
+    if 'batch_queue' not in st.session_state:
+        st.session_state.batch_queue = []
+    if 'batch_results' not in st.session_state:
+        st.session_state.batch_results = {}
+    if 'batch_processing' not in st.session_state:
+        st.session_state.batch_processing = False
+    
+    # Error tracking
+    if 'error_log' not in st.session_state:
+        st.session_state.error_log = []
+    if 'last_error' not in st.session_state:
+        st.session_state.last_error = None
+
 # Initialize session state
-if 'timestamps' not in st.session_state:
-    st.session_state.timestamps = None
-if 'video_id' not in st.session_state:
-    st.session_state.video_id = None
-if 'video_segments' not in st.session_state:
-    st.session_state.video_segments = []
-if 'video_url' not in st.session_state:
-    st.session_state.video_url = None
-if 'qa_results' not in st.session_state:
-    st.session_state.qa_results = []
-if 'qa_snippets' not in st.session_state:
-    st.session_state.qa_snippets = []
-if 'chapters_result' not in st.session_state:
-    st.session_state.chapters_result = None
-if 'highlights_result' not in st.session_state:
-    st.session_state.highlights_result = None
-if 'chapter_snippets' not in st.session_state:
-    st.session_state.chapter_snippets = []
-if 'highlight_snippets' not in st.session_state:
-    st.session_state.highlight_snippets = []
+initialize_session_state()
 
 
 def display_qa_snippet(file_name, query, snippet_info, snippet_index):
     """Display a QA video snippet with metadata."""
     if os.path.exists(file_name):
-        st.write(f"### 🎯 Query: {query}")
-        st.write(f"⏰ **Timeframe:** {snippet_info['start_time_str']} - {snippet_info['end_time_str']} ({snippet_info['duration']:.1f}s)")
-        st.write(f"🎯 **Confidence:** {snippet_info['confidence'] * 100:.1f}%")
+        st.write(f"### Query: {query}")
+        st.write(f"**Timeframe:** {snippet_info['start_time_str']} - {snippet_info['end_time_str']} ({snippet_info['duration']:.1f}s)")
+        st.write(f"**Confidence:** {snippet_info['confidence'] * 100:.1f}%")
         if snippet_info.get('text'):
-            st.write(f"💬 **Content Preview:** {snippet_info['text'][:150]}...")
+            st.write(f"**Content Preview:** {snippet_info['text'][:150]}...")
         
         st.video(file_name)
         
@@ -105,7 +477,7 @@ def process_qa_search():
     """Process QA search and create video snippets."""
     
     # Search scope selection
-    st.subheader("🔍 Search Scope")
+    st.subheader("Search Scope")
     
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -121,7 +493,7 @@ def process_qa_search():
             st.error("No video selected. Please upload or select a video first, or choose 'All videos in index'.")
             return
         elif search_scope == "All videos in index":
-            st.info("🌐 Searching across all videos in your TwelveLabs index")
+            st.info("Searching across all videos in your TwelveLabs index")
     
     # Check search readiness for current video (if applicable)
     if search_scope == "Current video only":
@@ -130,14 +502,14 @@ def process_qa_search():
             capabilities = get_video_qa_capabilities(client, st.session_state.video_id)
             
             if capabilities['ready_for_search']:
-                st.success("✅ Video is ready for Q&A search!")
+                st.success("Video is ready for Q&A search!")
             else:
-                st.warning("⏳ Video is still being processed for search. This can take a few minutes after upload.")
+                st.warning("Video is still being processed for search. This can take a few minutes after upload.")
                 st.info("""
                 **What's happening?**
-                - Your video has been uploaded successfully ✅
-                - Basic processing (timestamps) is complete ✅  
-                - Search indexing is still in progress ⏳
+                - Your video has been uploaded successfully
+                - Basic processing (timestamps) is complete  
+                - Search indexing is still in progress
                 
                 **What to do:**
                 - Wait 2-5 minutes and refresh this page
@@ -150,12 +522,12 @@ def process_qa_search():
     else:
         capabilities = {'ready_for_search': True}  # Index search should always be available
     
-    query = st.text_input("🔍 Ask a question about the video(s):", 
+    query = st.text_input("Ask a question about the video(s):", 
                          placeholder="e.g., 'What are the main topics discussed?', 'Show me the introduction', 'Find product demonstrations'",
                          disabled=not capabilities['ready_for_search'])
     
     # Analysis options
-    st.subheader("📊 Analysis Options")
+    st.subheader("Analysis Options")
     col1, col2, col3 = st.columns([1, 1, 2])
     
     with col1:
@@ -173,11 +545,11 @@ def process_qa_search():
     
     with col3:
         if analysis_mode == "Enhanced Analysis":
-            st.info("📝 Includes detailed analysis of each segment")
+            st.info("Includes detailed analysis of each segment")
         elif analysis_mode == "With Video Summary":
-            st.info("📖 Includes video summary + highlights + detailed segments")
+            st.info("Includes video summary + highlights + detailed segments")
         else:
-            st.info("⚡ Fast search with basic content preview")
+            st.info("Fast search with basic content preview")
     
     search_disabled = not capabilities['ready_for_search'] or not query
         
@@ -223,7 +595,7 @@ def process_qa_search():
                 
                 # Show additional analysis options
                 if analysis_mode in ["Enhanced Analysis", "With Video Summary"]:
-                    st.info("✨ Enhanced analysis powered by TwelveLabs multimodal understanding")
+                    st.info("Enhanced analysis powered by TwelveLabs multimodal understanding")
                 
                 # Option to create video snippets
                 # Note: Can only create snippets if we have video URLs
@@ -233,7 +605,7 @@ def process_qa_search():
                 elif search_scope == "Current video only" and not st.session_state.video_url:
                     st.info("Video snippets require streaming URL. Try refreshing the video URL first.")
                 elif search_scope == "All videos in index":
-                    st.info("💡 To create video snippets, search within a specific video that has streaming enabled.")
+                    st.info("To create video snippets, search within a specific video that has streaming enabled.")
                     
         except Exception as e:
             st.error(f"Error during search: {str(e)}")
@@ -282,7 +654,7 @@ def create_qa_snippets(query, search_results):
 def display_video_analysis_section():
     """Display standalone video analysis options for the current video."""
     st.markdown("---")
-    st.subheader("📊 Video Analysis & Insights")
+    st.subheader("Video Analysis & Insights")
     st.write("Get comprehensive analysis of your current video")
     
     if not st.session_state.video_id:
@@ -292,26 +664,26 @@ def display_video_analysis_section():
     col1, col2, col3 = st.columns([1, 1, 1])
     
     with col1:
-        if st.button("📝 Generate Summary", key="gen_summary_btn"):
+        if st.button("Generate Summary", key="gen_summary_btn"):
             try:
                 with st.spinner("Generating video summary..."):
                     client = TwelveLabs(api_key=API_KEY)
                     summary_result = generate_summary(client, st.session_state.video_id)
                     
-                    st.subheader("📝 Video Summary")
+                    st.subheader("Video Summary")
                     st.write(summary_result['summary'])
                     
             except Exception as e:
                 st.error(f"Error generating summary: {str(e)}")
     
     with col2:
-        if st.button("📑 Generate Chapters", key="gen_chapters_btn"):
+        if st.button("Generate Chapters", key="gen_chapters_btn"):
             try:
                 with st.spinner("Generating video chapters and creating snippets..."):
                     client = TwelveLabs(api_key=API_KEY)
                     chapters_result = generate_chapters(client, st.session_state.video_id)
                     
-                    st.subheader("📑 Video Chapters with Snippets")
+                    st.subheader("Video Chapters with Snippets")
                     
                     # Store chapters result in session state
                     st.session_state.chapters_result = chapters_result
@@ -323,9 +695,9 @@ def display_video_analysis_section():
                         end_time = seconds_to_mmss(chapter['end_sec'])
                         duration = chapter['end_sec'] - chapter['start_sec']
                         
-                        st.markdown(f"### 📖 Chapter {chapter['chapter_number']}: {chapter['chapter_title']}")
-                        st.write(f"**⏰ Time:** {start_time} - {end_time} ({duration:.1f}s)")
-                        st.write(f"**📝 Summary:** {chapter['chapter_summary']}")
+                        st.markdown(f"### Chapter {chapter['chapter_number']}: {chapter['chapter_title']}")
+                        st.write(f"**Time:** {start_time} - {end_time} ({duration:.1f}s)")
+                        st.write(f"**Summary:** {chapter['chapter_summary']}")
                         
                         # Try to create snippet automatically
                         snippet_created = False
@@ -370,27 +742,27 @@ def display_video_analysis_section():
                         with col_video:
                             if snippet_created and os.path.exists(snippet_filename):
                                 st.video(snippet_filename)
-                                st.success("✅ Snippet ready!")
+                                st.success("Snippet ready!")
                             else:
                                 # Show placeholder or HLS stream if available
                                 if st.session_state.video_url:
-                                    st.info(f"📹 Video segment: {start_time} - {end_time}")
+                                    st.info(f"Video segment: {start_time} - {end_time}")
                                     # Try to show the main video with timestamp info
                                     try:
                                         video_html = get_hls_player_html(st.session_state.video_url)
                                         st.components.v1.html(video_html, height=300)
-                                        st.caption(f"⏰ Jump to {start_time} in the main video")
+                                        st.caption(f"Jump to {start_time} in the main video")
                                     except:
                                         st.warning("Video preview not available")
                                 else:
-                                    st.info("🎬 Snippet creation requires video URL")
+                                    st.info("Snippet creation requires video URL")
                         
                         with col_download:
                             if snippet_created and os.path.exists(snippet_filename):
                                 with open(snippet_filename, "rb") as file:
                                     file_contents = file.read()
                                 st.download_button(
-                                    label=f"⬇️ Download",
+                                    label=f"Download",
                                     data=file_contents,
                                     file_name=snippet_filename,
                                     mime="video/mp4",
@@ -399,7 +771,7 @@ def display_video_analysis_section():
                                 )
                             else:
                                 st.button(
-                                    "🔄 Retry Snippet",
+                                    "Retry Snippet",
                                     key=f"retry_chapter_{chapter['chapter_number']}",
                                     help="Try creating snippet again",
                                     disabled=not st.session_state.video_url
@@ -411,13 +783,13 @@ def display_video_analysis_section():
                 st.error(f"Error generating chapters: {str(e)}")
     
     with col3:
-        if st.button("✨ Generate Highlights", key="gen_highlights_btn"):
+        if st.button("Generate Highlights", key="gen_highlights_btn"):
             try:
                 with st.spinner("Generating video highlights and creating snippets..."):
                     client = TwelveLabs(api_key=API_KEY)
                     highlights_result = generate_highlights(client, st.session_state.video_id)
                     
-                    st.subheader("✨ Video Highlights with Snippets")
+                    st.subheader("Video Highlights with Snippets")
                     
                     # Store highlights result in session state
                     st.session_state.highlights_result = highlights_result
@@ -429,10 +801,10 @@ def display_video_analysis_section():
                         end_time = seconds_to_mmss(highlight['end_sec'])
                         duration = highlight['end_sec'] - highlight['start_sec']
                         
-                        st.markdown(f"### ⭐ Highlight {i}: {highlight['highlight']}")
-                        st.write(f"**⏰ Time:** {start_time} - {end_time} ({duration:.1f}s)")
+                        st.markdown(f"### Highlight {i}: {highlight['highlight']}")
+                        st.write(f"**Time:** {start_time} - {end_time} ({duration:.1f}s)")
                         if highlight.get('highlight_summary'):
-                            st.write(f"**📝 Details:** {highlight['highlight_summary']}")
+                            st.write(f"**Details:** {highlight['highlight_summary']}")
                         
                         # Try to create snippet automatically
                         snippet_created = False
@@ -477,27 +849,27 @@ def display_video_analysis_section():
                         with col_video:
                             if snippet_created and os.path.exists(snippet_filename):
                                 st.video(snippet_filename)
-                                st.success("✅ Snippet ready!")
+                                st.success("Snippet ready!")
                             else:
                                 # Show placeholder or HLS stream if available
                                 if st.session_state.video_url:
-                                    st.info(f"📹 Video segment: {start_time} - {end_time}")
+                                    st.info(f"Video segment: {start_time} - {end_time}")
                                     # Try to show the main video with timestamp info
                                     try:
                                         video_html = get_hls_player_html(st.session_state.video_url)
                                         st.components.v1.html(video_html, height=300)
-                                        st.caption(f"⏰ Jump to {start_time} in the main video")
+                                        st.caption(f"Jump to {start_time} in the main video")
                                     except:
                                         st.warning("Video preview not available")
                                 else:
-                                    st.info("🎬 Snippet creation requires video URL")
+                                    st.info("Snippet creation requires video URL")
                         
                         with col_download:
                             if snippet_created and os.path.exists(snippet_filename):
                                 with open(snippet_filename, "rb") as file:
                                     file_contents = file.read()
                                 st.download_button(
-                                    label=f"⬇️ Download",
+                                    label=f"Download",
                                     data=file_contents,
                                     file_name=snippet_filename,
                                     mime="video/mp4",
@@ -506,7 +878,7 @@ def display_video_analysis_section():
                                 )
                             else:
                                 st.button(
-                                    "🔄 Retry Snippet",
+                                    "Retry Snippet",
                                     key=f"retry_highlight_{i}",
                                     help="Try creating snippet again",
                                     disabled=not st.session_state.video_url
@@ -518,7 +890,7 @@ def display_video_analysis_section():
                 st.error(f"Error generating highlights: {str(e)}")
     
     # Custom analysis section
-    st.subheader("🎯 Custom Analysis")
+    st.subheader("Custom Analysis")
     custom_prompt = st.text_area(
         "Enter custom analysis prompt:",
         placeholder="e.g., 'Analyze the emotional tone of this video', 'List all products mentioned', 'Identify key learning objectives'",
@@ -527,7 +899,7 @@ def display_video_analysis_section():
     
     col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("🔍 Analyze", key="custom_analysis_btn", disabled=not custom_prompt):
+        if st.button("Analyze", key="custom_analysis_btn", disabled=not custom_prompt):
             try:
                 with st.spinner("Performing custom analysis..."):
                     client = TwelveLabs(api_key=API_KEY)
@@ -538,29 +910,29 @@ def display_video_analysis_section():
                         temperature=0.3
                     )
                     
-                    st.subheader("🎯 Custom Analysis Results")
+                    st.subheader("Custom Analysis Results")
                     st.write(analysis_result['analysis'])
                     
             except Exception as e:
                 st.error(f"Error performing custom analysis: {str(e)}")
     
     with col2:
-        st.info("💡 **Analysis Tips:**\n- Be specific in your prompts\n- Ask about content, themes, or patterns\n- Request summaries for specific audiences\n- Analyze emotional tone or sentiment")
+        st.info("**Analysis Tips:**\n- Be specific in your prompts\n- Ask about content, themes, or patterns\n- Request summaries for specific audiences\n- Analyze emotional tone or sentiment")
 
 
 def display_qa_interface():
     """Main QA interface display function."""
-    st.subheader("🤖 Video Q&A Interface")
+    st.subheader("Video Q&A Interface")
     st.write("Ask questions about your videos and get relevant segments!")
     
     # Add helpful info about TwelveLabs search
-    with st.expander("ℹ️ How TwelveLabs Video Search Works"):
+    with st.expander("How TwelveLabs Video Search Works"):
         st.markdown("""
         **TwelveLabs Built-in Intelligence:**
         
-        🧠 **No Manual Setup Required**: TwelveLabs automatically creates embeddings and vector indices when you upload videos
+        **No Manual Setup Required**: TwelveLabs automatically creates embeddings and vector indices when you upload videos
         
-        🔍 **Multi-modal Search**: Searches across:
+        **Multi-modal Search**: Searches across:
         - **Visual content**: Objects, scenes, actions, people
         - **Audio content**: Speech, music, sounds, conversations  
         - **Text content**: Any text visible in the video
@@ -578,10 +950,10 @@ def display_qa_interface():
         - "Locate discussions about pricing"
         
         **Multi-Video Benefits:**
-        - ✅ Find content across your entire video library
-        - ✅ Compare similar content between videos
-        - ✅ Discover patterns across different videos
-        - ✅ Access comprehensive search results
+        - Find content across your entire video library
+        - Compare similar content between videos
+        - Discover patterns across different videos
+        - Access comprehensive search results
         """)
     
     # QA Search Interface
@@ -593,7 +965,7 @@ def display_qa_interface():
     
     # Display created QA snippets
     if st.session_state.qa_snippets:
-        st.subheader("📹 Q&A Video Snippets")
+        st.subheader("Q&A Video Snippets")
         for index, (file_name, query, snippet_info) in enumerate(st.session_state.qa_snippets):
             display_qa_snippet(file_name, query, snippet_info, index)
         
@@ -610,11 +982,11 @@ def display_qa_interface():
     # Show helpful message when no video is selected but interface is accessible
     if not st.session_state.video_id:
         st.info("""
-        💡 **Pro Tip**: Even without a specific video selected, you can:
+        **Pro Tip**: Even without a specific video selected, you can:
         - Search across **all videos in your index** using the "All videos in index" option
         - Find content from any video in your TwelveLabs library
-        - Upload a new video in the **"📤 Upload Video"** tab
-        - Select an existing video in the **"📂 Select Existing"** tab
+        - Upload a new video in the **"Upload Video"** tab
+        - Select an existing video in the **"Select Existing"** tab
         """)
 
 
@@ -664,34 +1036,241 @@ def process_and_display_segments():
 
 
 # Uplaoding feature and the processing of the video
-def upload_and_process_video():
-    video_type = st.selectbox("Select video type:", ["Basic Video (less than 30 mins)", "Podcast (30 mins to 1 hour)"])
-    uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "mov", "avi"])
+# Batch Processing Functions
+def add_to_batch_queue(file_info):
+    """Add a video file to the batch processing queue."""
+    batch_item = {
+        'id': str(uuid.uuid4()),
+        'filename': file_info['filename'],
+        'size': file_info['size'],
+        'type': file_info['type'],
+        'status': 'queued',
+        'video_id': None,
+        'timestamps': None,
+        'error': None,
+        'progress': 0
+    }
+    st.session_state.batch_queue.append(batch_item)
+    return batch_item['id']
 
-    if uploaded_file and st.button("Process Video", key="process_video_button"):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
-            tmp_file.write(uploaded_file.read())
-            video_path = tmp_file.name
+def process_batch_queue():
+    """Process all videos in the batch queue."""
+    if not st.session_state.batch_queue:
+        return
+    
+    st.session_state.batch_processing = True
+    client = TwelveLabs(api_key=API_KEY)
+    
+    for i, item in enumerate(st.session_state.batch_queue):
+        if item['status'] != 'queued':
+            continue
+            
         try:
-            with st.spinner("Processing video..."):
-                client = TwelveLabs(api_key=API_KEY)
-                timestamps, video_id = process_video(client, video_path, video_type)
-            st.success("Video processed successfully!")
-            st.session_state.timestamps = timestamps
-            st.session_state.video_id = video_id
-            st.session_state.video_url = get_video_url(video_id)
-            if st.session_state.video_url:
-                st.video(st.session_state.video_url)
-            else:
-                st.info("Video processed successfully! Note: Video streaming is being prepared and may take a few moments to become available.")
-        except ValueError as e:
-            st.error(f"Configuration Error: {str(e)}")
+            item['status'] = 'processing'
+            item['progress'] = 25
+            
+            # Here you would process the actual file
+            # For now, we'll simulate processing
+            timestamps, video_id = "00:00-Sample Chapter", f"video_{item['id'][:8]}"
+            
+            item['video_id'] = video_id
+            item['timestamps'] = timestamps
+            item['status'] = 'completed'
+            item['progress'] = 100
+            
+            st.session_state.batch_results[item['id']] = {
+                'video_id': video_id,
+                'timestamps': timestamps,
+                'filename': item['filename']
+            }
+            
         except Exception as e:
-            st.error(f"Processing Error: {str(e)}")
-            if "api_key" in str(e).lower():
-                st.info("This appears to be an API key issue. Please check your TwelveLabs API configuration.")
-        finally:
-            os.unlink(video_path)
+            item['status'] = 'error'
+            item['error'] = str(e)
+            display_enhanced_error('Batch Processing Error', str(e), 
+                                 get_recovery_suggestions('processing_error'))
+
+    st.session_state.batch_processing = False
+
+def display_batch_queue():
+    """Display the current batch processing queue."""
+    if not st.session_state.batch_queue:
+        return
+    
+    st.subheader("Batch Processing Queue")
+    
+    for item in st.session_state.batch_queue:
+        col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+        
+        with col1:
+            st.write(f"{item['filename']}")
+            
+        with col2:
+            if item['status'] == 'queued':
+                st.write("Queued")
+            elif item['status'] == 'processing':
+                st.progress(item['progress'] / 100)
+            elif item['status'] == 'completed':
+                st.write("Completed")
+            elif item['status'] == 'error':
+                st.write("Error")
+                
+        with col3:
+            st.write(f"{item['size']} MB")
+            
+        with col4:
+            if st.button("Remove", key=f"remove_{item['id']}", help="Remove from queue"):
+                st.session_state.batch_queue.remove(item)
+                st.experimental_rerun()
+
+def upload_and_process_video():
+    """Enhanced upload function with batch processing capabilities."""
+    st.subheader("Video Upload")
+    
+    # Batch vs Single upload toggle
+    upload_mode = st.radio("Upload Mode:", ["Single Video", "Batch Upload"], horizontal=True)
+    
+    if upload_mode == "Single Video":
+        # Original single video upload
+        video_type = st.selectbox("Select video type:", ["Basic Video (less than 30 mins)", "Podcast (30 mins to 1 hour)"])
+        uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "mov", "avi"])
+
+        if uploaded_file and st.button("Process Video", key="process_video_button"):
+            # Store processing status
+            st.session_state.processing_status[uploaded_file.name] = {
+                'status': 'processing',
+                'progress': 0,
+                'start_time': datetime.now()
+            }
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+                tmp_file.write(uploaded_file.read())
+                video_path = tmp_file.name
+            try:
+                with st.spinner("Processing video..."):
+                    # Update progress
+                    st.session_state.processing_status[uploaded_file.name]['progress'] = 50
+                    
+                    client = TwelveLabs(api_key=API_KEY)
+                    timestamps, video_id = process_video(client, video_path, video_type)
+                    
+                    # Update progress
+                    st.session_state.processing_status[uploaded_file.name]['progress'] = 100
+                    st.session_state.processing_status[uploaded_file.name]['status'] = 'completed'
+                    
+                st.success("Video processed successfully!")
+                st.session_state.timestamps = timestamps
+                st.session_state.video_id = video_id
+                st.session_state.video_url = get_video_url(video_id)
+                
+                # Store video metadata
+                st.session_state.video_metadata[video_id] = {
+                    'filename': uploaded_file.name,
+                    'upload_time': datetime.now(),
+                    'file_size': len(uploaded_file.getvalue()),
+                    'video_type': video_type
+                }
+                
+                if st.session_state.video_url:
+                    st.video(st.session_state.video_url)
+                else:
+                    st.info("Video processed successfully! Note: Video streaming is being prepared and may take a few moments to become available.")
+                    
+            except Exception as e:
+                st.session_state.processing_status[uploaded_file.name]['status'] = 'error'
+                display_enhanced_error('Upload Error', str(e), get_recovery_suggestions('upload_error'))
+            finally:
+                os.unlink(video_path)
+    
+    else:
+        # Batch upload mode
+        st.write("**Batch Upload Mode** - Upload multiple videos for processing")
+        
+        uploaded_files = st.file_uploader(
+            "Choose video files", 
+            type=["mp4", "mov", "avi"],
+            accept_multiple_files=True,
+            help="Select multiple video files to process in batch"
+        )
+        
+        if uploaded_files:
+            st.write(f"Selected {len(uploaded_files)} files:")
+            
+            total_size = 0
+            for file in uploaded_files:
+                file_size = len(file.getvalue()) / (1024 * 1024)  # Convert to MB
+                total_size += file_size
+                st.write(f"   • {file.name} ({file_size:.1f} MB)")
+            
+            st.write(f"Total size: {total_size:.1f} MB")
+            
+            col1, col2, col3 = st.columns([1, 1, 1])
+            
+            with col1:
+                if st.button("Add to Queue", key="add_to_queue"):
+                    for file in uploaded_files:
+                        file_info = {
+                            'filename': file.name,
+                            'size': len(file.getvalue()) / (1024 * 1024),
+                            'type': "Basic Video (less than 30 mins)"  # Default type
+                        }
+                        add_to_batch_queue(file_info)
+                    st.success(f"Added {len(uploaded_files)} files to processing queue!")
+                    st.experimental_rerun()
+            
+            with col2:
+                if st.button("Process Queue", key="process_queue", 
+                           disabled=st.session_state.batch_processing or not st.session_state.batch_queue):
+                    process_batch_queue()
+                    st.success("Batch processing completed!")
+                    st.experimental_rerun()
+            
+            with col3:
+                if st.button("Clear Queue", key="clear_queue"):
+                    st.session_state.batch_queue = []
+                    st.session_state.batch_results = {}
+                    st.success("Queue cleared!")
+                    st.experimental_rerun()
+        
+        # Display batch queue
+        display_batch_queue()
+        
+        # Display batch results
+        if st.session_state.batch_results:
+            st.subheader("Batch Results")
+            for batch_id, result in st.session_state.batch_results.items():
+                with st.expander(f"{result['filename']}"):
+                    st.write(f"**Video ID:** {result['video_id']}")
+                    st.write("**Timestamps:**")
+                    st.code(result['timestamps'])
+                    
+                    # Quick export for batch results
+                    if st.button(f"Copy Timestamps", key=f"copy_batch_{batch_id}"):
+                        st.components.v1.html(f"""
+                            <script>
+                            navigator.clipboard.writeText(`{result['timestamps']}`);
+                            </script>
+                        """, height=0)
+                        st.success("Timestamps copied to clipboard!")
+
+    # Display processing status for persistence
+    if st.session_state.processing_status:
+        st.subheader("Processing Status")
+        for filename, status in st.session_state.processing_status.items():
+            col1, col2, col3 = st.columns([2, 1, 1])
+            with col1:
+                st.write(f"{filename}")
+            with col2:
+                if status['status'] == 'processing':
+                    st.progress(status['progress'] / 100)
+                elif status['status'] == 'completed':
+                    st.write("Completed")
+                elif status['status'] == 'error':
+                    st.write("Error")
+            with col3:
+                if 'start_time' in status:
+                    elapsed = datetime.now() - status['start_time']
+                    st.write(f"Time: {elapsed.seconds}s")
 
 # Selecting the existing video from the Index and generating timestamps highlight
 def select_existing_video():
@@ -735,26 +1314,57 @@ def select_existing_video():
 def display_timestamps_and_segments():
     if st.session_state.timestamps:
         st.subheader("YouTube Chapter Timestamps")
-        st.write("Copy the Timestamp description and add it to the Youtube Video Description")
+        
+        # Enhanced export section
+        with st.expander("Export Options", expanded=True):
+            st.write("Choose your export format:")
+            
+            tab1, tab2, tab3 = st.tabs(["YouTube", "JSON", "CSV"])
+            
+            with tab1:
+                create_export_button({
+                    'qa_results': st.session_state.qa_results,
+                    'chapters': st.session_state.chapters_result,
+                    'highlights': st.session_state.highlights_result
+                }, export_type="youtube")
+            
+            with tab2:
+                create_export_button({
+                    'qa_results': st.session_state.qa_results,
+                    'chapters': st.session_state.chapters_result,
+                    'highlights': st.session_state.highlights_result
+                }, export_type="json")
+            
+            with tab3:
+                create_export_button({
+                    'qa_results': st.session_state.qa_results,
+                    'chapters': st.session_state.chapters_result,
+                    'highlights': st.session_state.highlights_result
+                }, export_type="csv")
+        
+        # Original display
+        st.write("**Raw Timestamps:**")
         st.code(st.session_state.timestamps, language="")
 
         # Check if video URL is available or try to refresh it
         if not st.session_state.video_url and st.session_state.video_id:
             if st.button("Refresh Video URL", key="refresh_video_url_button"):
-                st.session_state.video_url = get_video_url(st.session_state.video_id)
-                if st.session_state.video_url:
-                    st.success("Video URL is now available!")
-                    st.experimental_rerun()
-                else:
-                    st.info("Video streaming is still being prepared. Please try again in a few moments.")
+                try:
+                    st.session_state.video_url = get_video_url(st.session_state.video_id)
+                    if st.session_state.video_url:
+                        st.success("Video URL is now available!")
+                        st.experimental_rerun()
+                    else:
+                        st.info("Video streaming is still being prepared. Please try again in a few moments.")
+                except Exception as e:
+                    display_enhanced_error('URL Refresh Error', str(e), get_recovery_suggestions('api_error'))
 
         if st.session_state.video_url:
             if st.button("Create Video Segments", key="create_segments_button"):
                 try:
                     process_and_display_segments()
                 except Exception as e:
-                    st.error(f"Error creating video segments: {str(e)}")
-                    st.exception(e)  # This will display the full traceback
+                    display_enhanced_error('Segment Creation Error', str(e), get_recovery_suggestions('processing_error'))
         else:
             st.info("Video segments cannot be created because the video streaming URL is not yet available. This may take a few moments after upload. Try refreshing the video URL above.")
 
@@ -771,14 +1381,14 @@ def display_timestamps_and_segments():
                 st.success("All segment files have been cleared.")
                 st.experimental_rerun()
 
-def main():
+def run_app():
     # Configuration status check
     try:
         # Test if we can create a TwelveLabs client
         client = TwelveLabs(api_key=API_KEY)
-        st.success("✅ TwelveLabs API configuration is valid!")
+        st.success("TwelveLabs API configuration is valid!")
     except Exception as e:
-        st.error(f"❌ TwelveLabs API configuration error: {str(e)}")
+        st.error(f"TwelveLabs API configuration error: {str(e)}")
         st.info("""
         **Setup Instructions:**
         1. Copy `.env.example` to `.env`
@@ -790,7 +1400,7 @@ def main():
         return
     
     # Main navigation tabs
-    tab1, tab2, tab3 = st.tabs(["**📤 Upload Video**", "**📂 Select Existing**", "**🤖 Video Q&A**"])
+    tab1, tab2, tab3 = st.tabs(["Upload Video", "Select Existing", "Video Q&A"])
 
     with tab1:
         upload_and_process_video()
@@ -803,6 +1413,32 @@ def main():
     
     # Display timestamps and segments (shown on all tabs when available)
     display_timestamps_and_segments()
+
+def main():
+    st.set_page_config(
+        page_title="🎬 HootQnA - AI Video Analysis Platform", 
+        page_icon="🎬",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+
+    # Auth0 login
+    auth_info = sac.login_button(
+        clientId=AUTH0_CLIENT_ID,
+        domain=AUTH0_DOMAIN,
+    )
+
+    if not auth_info:
+        st.warning("Please log in to access the application.")
+        st.info("This is a demo application. You can use a dummy email and password to log in if you don't have an account.")
+        st.stop()
+
+    st.sidebar.success(f"Welcome, {auth_info['name']}!")
+    
+    with st.sidebar:
+        sac.logout_button()
+
+    run_app()
 
 if __name__ == "__main__":
     main()
