@@ -5,6 +5,14 @@ from datetime import datetime
 from twelvelabs import TwelveLabs
 import streamlit_auth0_component as sac
 from auth_config import AUTH0_DOMAIN, AUTH0_CLIENT_ID
+import database as db
+import logging
+
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
+
+# Initialize the database
+db.init_db()
 
 try:
     from utils import (
@@ -26,6 +34,79 @@ except Exception as e:
     st.stop()
 
 import uuid 
+
+def main():
+    st.set_page_config(
+        page_title="🎬 HootQnA - AI Video Analysis Platform", 
+        page_icon="🎬",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+
+    # Auth0 login
+    auth_info = sac.login_button(
+        clientId=AUTH0_CLIENT_ID,
+        domain=AUTH0_DOMAIN,
+    )
+
+    if not auth_info:
+        st.warning("Please log in to access the application.")
+        st.stop()
+
+    st.session_state.user_db_id = db.get_or_create_user(auth_info)
+
+    st.sidebar.success(f"Welcome, {auth_info['name']}!")
+    
+    with st.sidebar:
+        sac.logout_button()
+
+    run_app()
+
+def run_app():
+    # Using st.tabs for navigation
+    tab1, tab2, tab3, tab4 = st.tabs(["Upload Video", "My Videos", "Video Analysis", "Q&A"])
+
+    with tab1:
+        upload_and_process_video()
+
+    with tab2:
+        display_my_videos()
+
+    with tab3:
+        if 'video_id' in st.session_state and st.session_state.video_id:
+            display_video_analysis_section()
+        else:
+            st.info("Please select a video from the 'My Videos' tab to perform analysis.")
+
+    with tab4:
+        display_qa_interface()
+
+def display_my_videos():
+    st.header("My Processed Videos")
+    if 'user_db_id' not in st.session_state:
+        st.error("User not logged in properly.")
+        return
+
+    user_videos = db.get_user_videos(st.session_state.user_db_id)
+
+    if not user_videos:
+        st.info("You haven't processed any videos yet. Go to the 'Upload Video' tab to get started.")
+    else:
+        video_options = {f"{v['filename']} ({v['status']})": v['id'] for v in user_videos}
+        selected_video_display = st.selectbox("Choose a video to analyze", options=video_options.keys())
+
+        if selected_video_display:
+            db_video_id = video_options[selected_video_display]
+            video_data = db.get_video_by_id(db_video_id)
+            
+            if video_data and video_data['status'] == 'ready':
+                st.session_state.video_id = video_data['twelvelabs_video_id']
+                st.session_state.db_video_id = db_video_id # Store internal DB id
+                st.success(f"Selected video: **{video_data['filename']}**")
+                st.write("You can now generate summaries, chapters, or ask questions about this video in the other tabs.")
+            elif video_data:
+                st.warning(f"This video is currently in '{video_data['status']}' state and cannot be analyzed yet.")
+ 
 
 def log_error(error_type, error_message, context=None, recovery_suggestions=None):
     error_entry = {
@@ -665,229 +746,83 @@ def display_video_analysis_section():
     
     with col1:
         if st.button("Generate Summary", key="gen_summary_btn"):
-            try:
-                with st.spinner("Generating video summary..."):
-                    client = TwelveLabs(api_key=API_KEY)
-                    summary_result = generate_summary(client, st.session_state.video_id)
-                    
-                    st.subheader("Video Summary")
-                    st.write(summary_result['summary'])
-                    
-            except Exception as e:
-                st.error(f"Error generating summary: {str(e)}")
+            db_video_id = st.session_state.get('db_video_id')
+            if not db_video_id:
+                st.error("No database video ID found in session state.")
+                return
+
+            summary_data = db.get_analysis(db_video_id, "summary")
+            if summary_data:
+                st.subheader("Video Summary")
+                st.write(summary_data['summary'])
+            else:
+                try:
+                    with st.spinner("Generating video summary..."):
+                        client = TwelveLabs(api_key=API_KEY)
+                        summary_result = generate_summary(client, st.session_state.video_id)
+                        db.save_analysis(db_video_id, "summary", summary_result)
+                        st.subheader("Video Summary")
+                        st.write(summary_result['summary'])
+                except Exception as e:
+                    st.error(f"Error generating summary: {str(e)}")
     
     with col2:
         if st.button("Generate Chapters", key="gen_chapters_btn"):
-            try:
-                with st.spinner("Generating video chapters and creating snippets..."):
-                    client = TwelveLabs(api_key=API_KEY)
-                    chapters_result = generate_chapters(client, st.session_state.video_id)
-                    
-                    st.subheader("Video Chapters with Snippets")
-                    
-                    # Store chapters result in session state
-                    st.session_state.chapters_result = chapters_result
-                    st.session_state.chapter_snippets = []
-                    
-                    # Auto-create all snippets and display them
-                    for chapter in chapters_result['chapters']:
-                        start_time = seconds_to_mmss(chapter['start_sec'])
-                        end_time = seconds_to_mmss(chapter['end_sec'])
-                        duration = chapter['end_sec'] - chapter['start_sec']
-                        
-                        st.markdown(f"### Chapter {chapter['chapter_number']}: {chapter['chapter_title']}")
-                        st.write(f"**Time:** {start_time} - {end_time} ({duration:.1f}s)")
-                        st.write(f"**Summary:** {chapter['chapter_summary']}")
-                        
-                        # Try to create snippet automatically
-                        snippet_created = False
-                        snippet_filename = None
-                        
-                        if st.session_state.video_url and st.session_state.video_id:
-                            try:
-                                # Try using HLS-compatible method first
-                                try:
-                                    snippet_filename = create_hls_snippet_alternative(
-                                        video_id=st.session_state.video_id,
-                                        start_time=chapter['start_sec'],
-                                        end_time=chapter['end_sec'],
-                                        title=chapter['chapter_title'],
-                                        snippet_type="chapter"
-                                    )
-                                    snippet_created = True
-                                except Exception as hls_error:
-                                    # Fallback to URL-based method
-                                    snippet_filename = create_analysis_video_snippet(
-                                        video_url=st.session_state.video_url,
-                                        start_time=chapter['start_sec'],
-                                        end_time=chapter['end_sec'],
-                                        title=chapter['chapter_title'],
-                                        snippet_type="chapter"
-                                    )
-                                    snippet_created = True
-                                
-                                # Store snippet info
-                                st.session_state.chapter_snippets.append({
-                                    'filename': snippet_filename,
-                                    'title': chapter['chapter_title'],
-                                    'chapter_number': chapter['chapter_number']
-                                })
-                                
-                            except Exception as e:
-                                st.warning(f"Could not create snippet: {str(e)}")
-                        
-                        # Display snippet or placeholder
-                        col_video, col_download = st.columns([2, 1])
-                        
-                        with col_video:
-                            if snippet_created and os.path.exists(snippet_filename):
-                                st.video(snippet_filename)
-                                st.success("Snippet ready!")
-                            else:
-                                # Show placeholder or HLS stream if available
-                                if st.session_state.video_url:
-                                    st.info(f"Video segment: {start_time} - {end_time}")
-                                    # Try to show the main video with timestamp info
-                                    try:
-                                        video_html = get_hls_player_html(st.session_state.video_url)
-                                        st.components.v1.html(video_html, height=300)
-                                        st.caption(f"Jump to {start_time} in the main video")
-                                    except:
-                                        st.warning("Video preview not available")
-                                else:
-                                    st.info("Snippet creation requires video URL")
-                        
-                        with col_download:
-                            if snippet_created and os.path.exists(snippet_filename):
-                                with open(snippet_filename, "rb") as file:
-                                    file_contents = file.read()
-                                st.download_button(
-                                    label=f"Download",
-                                    data=file_contents,
-                                    file_name=snippet_filename,
-                                    mime="video/mp4",
-                                    key=f"download_chapter_{chapter['chapter_number']}",
-                                    help=f"Download Chapter {chapter['chapter_number']} snippet"
-                                )
-                            else:
-                                st.button(
-                                    "Retry Snippet",
-                                    key=f"retry_chapter_{chapter['chapter_number']}",
-                                    help="Try creating snippet again",
-                                    disabled=not st.session_state.video_url
-                                )
-                        
-                        st.markdown("---")
-                        
-            except Exception as e:
-                st.error(f"Error generating chapters: {str(e)}")
+            db_video_id = st.session_state.get('db_video_id')
+            if not db_video_id:
+                st.error("No database video ID found in session state.")
+                return
+            
+            chapters_data = db.get_analysis(db_video_id, "chapters")
+            if chapters_data:
+                st.subheader("Video Chapters")
+                for chapter in chapters_data['chapters']:
+                    st.write(f"**{chapter['chapter_title']}**")
+                    st.write(f"_{seconds_to_mmss(chapter['start_sec'])} - {seconds_to_mmss(chapter['end_sec'])}_")
+                    st.write(chapter['chapter_summary'])
+                    st.markdown("---")
+            else:
+                try:
+                    with st.spinner("Generating video chapters..."):
+                        client = TwelveLabs(api_key=API_KEY)
+                        chapters_result = generate_chapters(client, st.session_state.video_id)
+                        db.save_analysis(db_video_id, "chapters", chapters_result)
+                        st.subheader("Video Chapters")
+                        for chapter in chapters_result['chapters']:
+                            st.write(f"**{chapter['chapter_title']}**")
+                            st.write(f"_{seconds_to_mmss(chapter['start_sec'])} - {seconds_to_mmss(chapter['end_sec'])}_")
+                            st.write(chapter['chapter_summary'])
+                            st.markdown("---")
+                except Exception as e:
+                    st.error(f"Error generating chapters: {str(e)}")
     
     with col3:
         if st.button("Generate Highlights", key="gen_highlights_btn"):
-            try:
-                with st.spinner("Generating video highlights and creating snippets..."):
-                    client = TwelveLabs(api_key=API_KEY)
-                    highlights_result = generate_highlights(client, st.session_state.video_id)
-                    
-                    st.subheader("Video Highlights with Snippets")
-                    
-                    # Store highlights result in session state
-                    st.session_state.highlights_result = highlights_result
-                    st.session_state.highlight_snippets = []
-                    
-                    # Auto-create all snippets and display them
-                    for i, highlight in enumerate(highlights_result['highlights'], 1):
-                        start_time = seconds_to_mmss(highlight['start_sec'])
-                        end_time = seconds_to_mmss(highlight['end_sec'])
-                        duration = highlight['end_sec'] - highlight['start_sec']
-                        
-                        st.markdown(f"### Highlight {i}: {highlight['highlight']}")
-                        st.write(f"**Time:** {start_time} - {end_time} ({duration:.1f}s)")
-                        if highlight.get('highlight_summary'):
-                            st.write(f"**Details:** {highlight['highlight_summary']}")
-                        
-                        # Try to create snippet automatically
-                        snippet_created = False
-                        snippet_filename = None
-                        
-                        if st.session_state.video_url and st.session_state.video_id:
-                            try:
-                                # Try using HLS-compatible method first
-                                try:
-                                    snippet_filename = create_hls_snippet_alternative(
-                                        video_id=st.session_state.video_id,
-                                        start_time=highlight['start_sec'],
-                                        end_time=highlight['end_sec'],
-                                        title=highlight['highlight'],
-                                        snippet_type="highlight"
-                                    )
-                                    snippet_created = True
-                                except Exception as hls_error:
-                                    # Fallback to URL-based method
-                                    snippet_filename = create_analysis_video_snippet(
-                                        video_url=st.session_state.video_url,
-                                        start_time=highlight['start_sec'],
-                                        end_time=highlight['end_sec'],
-                                        title=highlight['highlight'],
-                                        snippet_type="highlight"
-                                    )
-                                    snippet_created = True
-                                
-                                # Store snippet info
-                                st.session_state.highlight_snippets.append({
-                                    'filename': snippet_filename,
-                                    'title': highlight['highlight'],
-                                    'highlight_number': i
-                                })
-                                
-                            except Exception as e:
-                                st.warning(f"Could not create snippet: {str(e)}")
-                        
-                        # Display snippet or placeholder
-                        col_video, col_download = st.columns([2, 1])
-                        
-                        with col_video:
-                            if snippet_created and os.path.exists(snippet_filename):
-                                st.video(snippet_filename)
-                                st.success("Snippet ready!")
-                            else:
-                                # Show placeholder or HLS stream if available
-                                if st.session_state.video_url:
-                                    st.info(f"Video segment: {start_time} - {end_time}")
-                                    # Try to show the main video with timestamp info
-                                    try:
-                                        video_html = get_hls_player_html(st.session_state.video_url)
-                                        st.components.v1.html(video_html, height=300)
-                                        st.caption(f"Jump to {start_time} in the main video")
-                                    except:
-                                        st.warning("Video preview not available")
-                                else:
-                                    st.info("Snippet creation requires video URL")
-                        
-                        with col_download:
-                            if snippet_created and os.path.exists(snippet_filename):
-                                with open(snippet_filename, "rb") as file:
-                                    file_contents = file.read()
-                                st.download_button(
-                                    label=f"Download",
-                                    data=file_contents,
-                                    file_name=snippet_filename,
-                                    mime="video/mp4",
-                                    key=f"download_highlight_{i}",
-                                    help=f"Download Highlight {i} snippet"
-                                )
-                            else:
-                                st.button(
-                                    "Retry Snippet",
-                                    key=f"retry_highlight_{i}",
-                                    help="Try creating snippet again",
-                                    disabled=not st.session_state.video_url
-                                )
-                        
-                        st.markdown("---")
-                        
-            except Exception as e:
-                st.error(f"Error generating highlights: {str(e)}")
+            db_video_id = st.session_state.get('db_video_id')
+            if not db_video_id:
+                st.error("No database video ID found in session state.")
+                return
+
+            highlights_data = db.get_analysis(db_video_id, "highlights")
+            if highlights_data:
+                st.subheader("Video Highlights")
+                for highlight in highlights_data['highlights']:
+                    st.write(f"**{highlight['highlight']}**")
+                    st.write(f"_{seconds_to_mmss(highlight['start_sec'])} - {seconds_to_mmss(highlight['end_sec'])}_")
+                    st.markdown("---")
+            else:
+                try:
+                    with st.spinner("Generating video highlights..."):
+                        client = TwelveLabs(api_key=API_KEY)
+                        highlights_result = generate_highlights(client, st.session_state.video_id)
+                        db.save_analysis(db_video_id, "highlights", highlights_result)
+                        st.subheader("Video Highlights")
+                        for highlight in highlights_result['highlights']:
+                            st.write(f"**{highlight['highlight']}**")
+                            st.write(f"_{seconds_to_mmss(highlight['start_sec'])} - {seconds_to_mmss(highlight['end_sec'])}_")
+                            st.markdown("---")
+                except Exception as e:
+                    st.error(f"Error generating highlights: {str(e)}")
     
     # Custom analysis section
     st.subheader("Custom Analysis")
@@ -900,24 +835,36 @@ def display_video_analysis_section():
     col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("Analyze", key="custom_analysis_btn", disabled=not custom_prompt):
-            try:
-                with st.spinner("Performing custom analysis..."):
-                    client = TwelveLabs(api_key=API_KEY)
-                    analysis_result = generate_open_analysis(
-                        client, 
-                        st.session_state.video_id, 
-                        custom_prompt, 
-                        temperature=0.3
-                    )
-                    
-                    st.subheader("Custom Analysis Results")
-                    st.write(analysis_result['analysis'])
-                    
-            except Exception as e:
-                st.error(f"Error performing custom analysis: {str(e)}")
+            db_video_id = st.session_state.get('db_video_id')
+            if not db_video_id:
+                st.error("No database video ID found in session state.")
+                return
+            
+            analysis_type = f"custom_{custom_prompt[:50].replace(' ', '_')}"
+            custom_analysis = db.get_analysis(db_video_id, analysis_type)
+
+            if custom_analysis:
+                st.subheader("Custom Analysis Results")
+                st.write(custom_analysis['analysis'])
+            else:
+                try:
+                    with st.spinner("Performing custom analysis..."):
+                        client = TwelveLabs(api_key=API_KEY)
+                        analysis_result = generate_open_analysis(
+                            client, 
+                            st.session_state.video_id, 
+                            custom_prompt, 
+                            temperature=0.3
+                        )
+                        db.save_analysis(db_video_id, analysis_type, analysis_result)
+                        st.subheader("Custom Analysis Results")
+                        st.write(analysis_result['analysis'])
+                except Exception as e:
+                    st.error(f"Error performing custom analysis: {str(e)}")
     
     with col2:
         st.info("**Analysis Tips:**\n- Be specific in your prompts\n- Ask about content, themes, or patterns\n- Request summaries for specific audiences\n- Analyze emotional tone or sentiment")
+
 
 
 def display_qa_interface():
@@ -1154,12 +1101,46 @@ def upload_and_process_video():
                     client = TwelveLabs(api_key=API_KEY)
                     timestamps, video_id = process_video(client, video_path, video_type)
                     
+                    # Add to database
+                    db.add_video(st.session_state.user_db_id, uploaded_file.name, video_id, 'ready')
+
                     # Update progress
                     st.session_state.processing_status[uploaded_file.name]['progress'] = 100
                     st.session_state.processing_status[uploaded_file.name]['status'] = 'completed'
                     
                 st.success("Video processed successfully!")
                 st.session_state.timestamps = timestamps
+                st.session_state.video_id = video_id
+                st.experimental_rerun()
+            except Exception as e:
+                display_enhanced_error('processing_error', str(e), get_recovery_suggestions('processing_error'))
+                # Update status in DB
+                if 'video_id' in locals() and video_id:
+                    db.update_video_status(video_id, 'failed')
+            finally:
+                if 'video_path' in locals() and os.path.exists(video_path):
+                    os.remove(video_path)
+    
+    elif upload_mode == "Batch Upload":
+        uploaded_files = st.file_uploader("Choose video files for batch processing", 
+                                          type=["mp4", "mov", "avi"], accept_multiple_files=True)
+        
+        if uploaded_files:
+            for file in uploaded_files:
+                file_info = {
+                    'filename': file.name,
+                    'size': round(file.size / (1024 * 1024), 2),
+                    'type': file.type
+                }
+                add_to_batch_queue(file_info)
+            
+            display_batch_queue()
+            
+            if st.button("Start Batch Processing", key="start_batch_button"):
+                process_batch_queue()
+                st.success("Batch processing started. Check the queue for progress.")
+                st.experimental_rerun()
+
                 st.session_state.video_id = video_id
                 st.session_state.video_url = get_video_url(video_id)
                 
