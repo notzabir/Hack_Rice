@@ -663,7 +663,7 @@ def process_and_display_segments():
     status_text.text("All segments processed!")
 
 
-# Uplaoding feature and the processing of the video
+# Uploading feature and the processing of the video
 def upload_and_process_video():
     video_type = st.selectbox("Select video type:", ["Basic Video (less than 30 mins)", "Podcast (30 mins to 1 hour)"])
     uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "mov", "avi"])
