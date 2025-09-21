@@ -14,7 +14,8 @@ try:
         get_video_qa_capabilities, seconds_to_mmss,
         generate_summary, generate_chapters, generate_highlights,
         generate_open_analysis, create_analysis_video_snippet,
-        create_hls_snippet_alternative
+        create_hls_snippet_alternative,
+        generate_topics, generate_entities, rewrite_followup_query
     )
 except ValueError as e:
     st.error(f"Configuration Error: {str(e)}")
@@ -47,7 +48,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Streamlit Page Header
-st.markdown("<h2 style='text-align: center;'>HootQnA: Chat with Videos ✍🤖</h2>", unsafe_allow_html=True)
+st.markdown("<h2 style='text-align: center;'>HootQnA: Chat with Videos</h2>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center; color: #666;'>Generate timestamps, create video segments, and ask questions about your videos!</p>", unsafe_allow_html=True)
 st.markdown("---")
 
@@ -72,16 +73,26 @@ if 'chapter_snippets' not in st.session_state:
     st.session_state.chapter_snippets = []
 if 'highlight_snippets' not in st.session_state:
     st.session_state.highlight_snippets = []
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []  # list of {role, content}
+if 'last_query' not in st.session_state:
+    st.session_state.last_query = None
+if 'last_search_scope' not in st.session_state:
+    st.session_state.last_search_scope = "Current video only"
+if 'topics_result' not in st.session_state:
+    st.session_state.topics_result = None
+if 'entities_result' not in st.session_state:
+    st.session_state.entities_result = None
 
 
 def display_qa_snippet(file_name, query, snippet_info, snippet_index):
     """Display a QA video snippet with metadata."""
     if os.path.exists(file_name):
-        st.write(f"### 🎯 Query: {query}")
-        st.write(f"⏰ **Timeframe:** {snippet_info['start_time_str']} - {snippet_info['end_time_str']} ({snippet_info['duration']:.1f}s)")
-        st.write(f"🎯 **Confidence:** {snippet_info['confidence'] * 100:.1f}%")
+        st.write(f"### Query: {query}")
+        st.write(f"**Timeframe:** {snippet_info['start_time_str']} - {snippet_info['end_time_str']} ({snippet_info['duration']:.1f}s)")
+        st.write(f"**Confidence:** {snippet_info['confidence'] * 100:.1f}%")
         if snippet_info.get('text'):
-            st.write(f"💬 **Content Preview:** {snippet_info['text'][:150]}...")
+            st.write(f"**Content Preview:** {snippet_info['text'][:150]}...")
         
         st.video(file_name)
         
@@ -105,7 +116,7 @@ def process_qa_search():
     """Process QA search and create video snippets."""
     
     # Search scope selection
-    st.subheader("🔍 Search Scope")
+    st.subheader("Search Scope")
     
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -121,7 +132,7 @@ def process_qa_search():
             st.error("No video selected. Please upload or select a video first, or choose 'All videos in index'.")
             return
         elif search_scope == "All videos in index":
-            st.info("🌐 Searching across all videos in your TwelveLabs index")
+            st.info("Searching across all videos in your TwelveLabs index")
     
     # Check search readiness for current video (if applicable)
     if search_scope == "Current video only":
@@ -130,14 +141,14 @@ def process_qa_search():
             capabilities = get_video_qa_capabilities(client, st.session_state.video_id)
             
             if capabilities['ready_for_search']:
-                st.success("✅ Video is ready for Q&A search!")
+                st.success("Video is ready for Q&A search!")
             else:
-                st.warning("⏳ Video is still being processed for search. This can take a few minutes after upload.")
+                st.warning("Video is still being processed for search. This can take a few minutes after upload.")
                 st.info("""
                 **What's happening?**
-                - Your video has been uploaded successfully ✅
-                - Basic processing (timestamps) is complete ✅  
-                - Search indexing is still in progress ⏳
+                - Your video has been uploaded successfully
+                - Basic processing (timestamps) is complete  
+                - Search indexing is still in progress
                 
                 **What to do:**
                 - Wait 2-5 minutes and refresh this page
@@ -150,12 +161,12 @@ def process_qa_search():
     else:
         capabilities = {'ready_for_search': True}  # Index search should always be available
     
-    query = st.text_input("🔍 Ask a question about the video(s):", 
+    query = st.text_input("Ask a question about the video(s):", 
                          placeholder="e.g., 'What are the main topics discussed?', 'Show me the introduction', 'Find product demonstrations'",
                          disabled=not capabilities['ready_for_search'])
     
     # Analysis options
-    st.subheader("📊 Analysis Options")
+    st.subheader("Analysis Options")
     col1, col2, col3 = st.columns([1, 1, 2])
     
     with col1:
@@ -173,11 +184,11 @@ def process_qa_search():
     
     with col3:
         if analysis_mode == "Enhanced Analysis":
-            st.info("📝 Includes detailed analysis of each segment")
+            st.info("Includes detailed analysis of each segment")
         elif analysis_mode == "With Video Summary":
-            st.info("📖 Includes video summary + highlights + detailed segments")
+            st.info("Includes video summary + highlights + detailed segments")
         else:
-            st.info("⚡ Fast search with basic content preview")
+            st.info("Fast search with basic content preview")
     
     search_disabled = not capabilities['ready_for_search'] or not query
         
@@ -206,6 +217,11 @@ def process_qa_search():
                     return
                 
                 st.session_state.qa_results = search_results
+                st.session_state.last_query = query
+                st.session_state.last_search_scope = search_scope
+                # Update chat history (compact)
+                st.session_state.chat_history.append({"role": "user", "content": query})
+                st.session_state.chat_history.append({"role": "assistant", "content": f"Found {len(search_results)} segments in {('current video' if target_video_id else 'index')} for: {query}"})
                 
                 # Display search results based on analysis mode
                 scope_text = "current video" if search_scope == "Current video only" else "index"
@@ -223,7 +239,7 @@ def process_qa_search():
                 
                 # Show additional analysis options
                 if analysis_mode in ["Enhanced Analysis", "With Video Summary"]:
-                    st.info("✨ Enhanced analysis powered by TwelveLabs multimodal understanding")
+                    st.info("Enhanced analysis powered by TwelveLabs multimodal understanding")
                 
                 # Option to create video snippets
                 # Note: Can only create snippets if we have video URLs
@@ -233,10 +249,42 @@ def process_qa_search():
                 elif search_scope == "Current video only" and not st.session_state.video_url:
                     st.info("Video snippets require streaming URL. Try refreshing the video URL first.")
                 elif search_scope == "All videos in index":
-                    st.info("💡 To create video snippets, search within a specific video that has streaming enabled.")
+                    st.info("To create video snippets, search within a specific video that has streaming enabled.")
                     
         except Exception as e:
             st.error(f"Error during search: {str(e)}")
+    
+    # Conversational follow-up UI
+    with st.expander("Ask a follow-up question", expanded=False):
+        followup = st.text_input("Follow-up question", key="followup_input", placeholder="e.g., Narrow down to the part about pricing")
+        if st.session_state.get('qa_results') and followup and st.button("Ask follow-up", key="followup_button"):
+            try:
+                client = TwelveLabs(api_key=API_KEY)
+                # Keep scope consistent with last search
+                scope = st.session_state.get('last_search_scope', search_scope)
+                target_video_id = st.session_state.video_id if scope == "Current video only" else None
+                # Rewrite follow-up to standalone
+                rewritten = rewrite_followup_query(client, target_video_id, st.session_state.chat_history, followup)
+                standalone_query = rewritten.get('query') or followup
+                with st.spinner("Searching follow-up..."):
+                    results = search_video_content(client, target_video_id, standalone_query, max_results)
+                if not results:
+                    st.info(f"No results for follow-up: '{standalone_query}'")
+                else:
+                    st.session_state.qa_results = results
+                    st.session_state.last_query = standalone_query
+                    st.session_state.chat_history.append({"role": "user", "content": followup})
+                    st.session_state.chat_history.append({"role": "assistant", "content": f"Rewritten: {standalone_query}. Found {len(results)} segments."})
+                    # Render results in the same selected analysis mode
+                    if analysis_mode == "With Video Summary":
+                        formatted_results = format_qa_results_with_summary(results, standalone_query, client)
+                    elif analysis_mode == "Enhanced Analysis":
+                        formatted_results = format_qa_results(results, standalone_query, client, include_rich_analysis=True)
+                    else:
+                        formatted_results = format_qa_results(results, standalone_query, client, include_rich_analysis=False)
+                    st.markdown(formatted_results)
+            except Exception as e:
+                st.error(f"Follow-up error: {str(e)}")
 def create_qa_snippets(query, search_results):
     """Create video snippets from search results."""
     try:
@@ -282,55 +330,55 @@ def create_qa_snippets(query, search_results):
 def display_video_analysis_section():
     """Display standalone video analysis options for the current video."""
     st.markdown("---")
-    st.subheader("📊 Video Analysis & Insights")
+    st.subheader("Video Analysis & Insights")
     st.write("Get comprehensive analysis of your current video")
-    
+
     if not st.session_state.video_id:
         return
-    
+
     # Analysis options
     col1, col2, col3 = st.columns([1, 1, 1])
-    
+
     with col1:
-        if st.button("📝 Generate Summary", key="gen_summary_btn"):
+        if st.button("Generate Summary", key="gen_summary_btn"):
             try:
                 with st.spinner("Generating video summary..."):
                     client = TwelveLabs(api_key=API_KEY)
                     summary_result = generate_summary(client, st.session_state.video_id)
-                    
-                    st.subheader("📝 Video Summary")
+
+                    st.subheader("Video Summary")
                     st.write(summary_result['summary'])
-                    
+
             except Exception as e:
                 st.error(f"Error generating summary: {str(e)}")
-    
+
     with col2:
-        if st.button("📑 Generate Chapters", key="gen_chapters_btn"):
+        if st.button("Generate Chapters", key="gen_chapters_btn"):
             try:
                 with st.spinner("Generating video chapters and creating snippets..."):
                     client = TwelveLabs(api_key=API_KEY)
                     chapters_result = generate_chapters(client, st.session_state.video_id)
-                    
-                    st.subheader("📑 Video Chapters with Snippets")
-                    
+
+                    st.subheader("Video Chapters with Snippets")
+
                     # Store chapters result in session state
                     st.session_state.chapters_result = chapters_result
                     st.session_state.chapter_snippets = []
-                    
+
                     # Auto-create all snippets and display them
                     for chapter in chapters_result['chapters']:
                         start_time = seconds_to_mmss(chapter['start_sec'])
                         end_time = seconds_to_mmss(chapter['end_sec'])
                         duration = chapter['end_sec'] - chapter['start_sec']
-                        
-                        st.markdown(f"### 📖 Chapter {chapter['chapter_number']}: {chapter['chapter_title']}")
-                        st.write(f"**⏰ Time:** {start_time} - {end_time} ({duration:.1f}s)")
-                        st.write(f"**📝 Summary:** {chapter['chapter_summary']}")
-                        
+
+                        st.markdown(f"### Chapter {chapter['chapter_number']}: {chapter['chapter_title']}")
+                        st.write(f"**Time:** {start_time} - {end_time} ({duration:.1f}s)")
+                        st.write(f"**Summary:** {chapter['chapter_summary']}")
+
                         # Try to create snippet automatically
                         snippet_created = False
                         snippet_filename = None
-                        
+
                         if st.session_state.video_url and st.session_state.video_id:
                             try:
                                 # Try using HLS-compatible method first
@@ -343,7 +391,7 @@ def display_video_analysis_section():
                                         snippet_type="chapter"
                                     )
                                     snippet_created = True
-                                except Exception as hls_error:
+                                except Exception:
                                     # Fallback to URL-based method
                                     snippet_filename = create_analysis_video_snippet(
                                         video_url=st.session_state.video_url,
@@ -353,44 +401,44 @@ def display_video_analysis_section():
                                         snippet_type="chapter"
                                     )
                                     snippet_created = True
-                                
+
                                 # Store snippet info
                                 st.session_state.chapter_snippets.append({
                                     'filename': snippet_filename,
                                     'title': chapter['chapter_title'],
                                     'chapter_number': chapter['chapter_number']
                                 })
-                                
+
                             except Exception as e:
                                 st.warning(f"Could not create snippet: {str(e)}")
-                        
+
                         # Display snippet or placeholder
                         col_video, col_download = st.columns([2, 1])
-                        
+
                         with col_video:
                             if snippet_created and os.path.exists(snippet_filename):
                                 st.video(snippet_filename)
-                                st.success("✅ Snippet ready!")
+                                st.success("Snippet ready!")
                             else:
                                 # Show placeholder or HLS stream if available
                                 if st.session_state.video_url:
-                                    st.info(f"📹 Video segment: {start_time} - {end_time}")
+                                    st.info(f"Video segment: {start_time} - {end_time}")
                                     # Try to show the main video with timestamp info
                                     try:
                                         video_html = get_hls_player_html(st.session_state.video_url)
                                         st.components.v1.html(video_html, height=300)
-                                        st.caption(f"⏰ Jump to {start_time} in the main video")
-                                    except:
+                                        st.caption(f"Jump to {start_time} in the main video")
+                                    except Exception:
                                         st.warning("Video preview not available")
                                 else:
-                                    st.info("🎬 Snippet creation requires video URL")
-                        
+                                    st.info("Snippet creation requires video URL")
+
                         with col_download:
                             if snippet_created and os.path.exists(snippet_filename):
                                 with open(snippet_filename, "rb") as file:
                                     file_contents = file.read()
                                 st.download_button(
-                                    label=f"⬇️ Download",
+                                    label="Download",
                                     data=file_contents,
                                     file_name=snippet_filename,
                                     mime="video/mp4",
@@ -399,45 +447,45 @@ def display_video_analysis_section():
                                 )
                             else:
                                 st.button(
-                                    "🔄 Retry Snippet",
+                                    "Retry Snippet",
                                     key=f"retry_chapter_{chapter['chapter_number']}",
                                     help="Try creating snippet again",
                                     disabled=not st.session_state.video_url
                                 )
-                        
+
                         st.markdown("---")
-                        
+
             except Exception as e:
                 st.error(f"Error generating chapters: {str(e)}")
-    
+
     with col3:
-        if st.button("✨ Generate Highlights", key="gen_highlights_btn"):
+        if st.button("Generate Highlights", key="gen_highlights_btn"):
             try:
                 with st.spinner("Generating video highlights and creating snippets..."):
                     client = TwelveLabs(api_key=API_KEY)
                     highlights_result = generate_highlights(client, st.session_state.video_id)
-                    
-                    st.subheader("✨ Video Highlights with Snippets")
-                    
+
+                    st.subheader("Video Highlights with Snippets")
+
                     # Store highlights result in session state
                     st.session_state.highlights_result = highlights_result
                     st.session_state.highlight_snippets = []
-                    
+
                     # Auto-create all snippets and display them
                     for i, highlight in enumerate(highlights_result['highlights'], 1):
                         start_time = seconds_to_mmss(highlight['start_sec'])
                         end_time = seconds_to_mmss(highlight['end_sec'])
                         duration = highlight['end_sec'] - highlight['start_sec']
-                        
-                        st.markdown(f"### ⭐ Highlight {i}: {highlight['highlight']}")
-                        st.write(f"**⏰ Time:** {start_time} - {end_time} ({duration:.1f}s)")
+
+                        st.markdown(f"### Highlight {i}: {highlight['highlight']}")
+                        st.write(f"**Time:** {start_time} - {end_time} ({duration:.1f}s)")
                         if highlight.get('highlight_summary'):
-                            st.write(f"**📝 Details:** {highlight['highlight_summary']}")
-                        
+                            st.write(f"**Details:** {highlight['highlight_summary']}")
+
                         # Try to create snippet automatically
                         snippet_created = False
                         snippet_filename = None
-                        
+
                         if st.session_state.video_url and st.session_state.video_id:
                             try:
                                 # Try using HLS-compatible method first
@@ -450,7 +498,7 @@ def display_video_analysis_section():
                                         snippet_type="highlight"
                                     )
                                     snippet_created = True
-                                except Exception as hls_error:
+                                except Exception:
                                     # Fallback to URL-based method
                                     snippet_filename = create_analysis_video_snippet(
                                         video_url=st.session_state.video_url,
@@ -460,44 +508,44 @@ def display_video_analysis_section():
                                         snippet_type="highlight"
                                     )
                                     snippet_created = True
-                                
+
                                 # Store snippet info
                                 st.session_state.highlight_snippets.append({
                                     'filename': snippet_filename,
                                     'title': highlight['highlight'],
                                     'highlight_number': i
                                 })
-                                
+
                             except Exception as e:
                                 st.warning(f"Could not create snippet: {str(e)}")
-                        
+
                         # Display snippet or placeholder
                         col_video, col_download = st.columns([2, 1])
-                        
+
                         with col_video:
                             if snippet_created and os.path.exists(snippet_filename):
                                 st.video(snippet_filename)
-                                st.success("✅ Snippet ready!")
+                                st.success("Snippet ready!")
                             else:
                                 # Show placeholder or HLS stream if available
                                 if st.session_state.video_url:
-                                    st.info(f"📹 Video segment: {start_time} - {end_time}")
+                                    st.info(f"Video segment: {start_time} - {end_time}")
                                     # Try to show the main video with timestamp info
                                     try:
                                         video_html = get_hls_player_html(st.session_state.video_url)
                                         st.components.v1.html(video_html, height=300)
-                                        st.caption(f"⏰ Jump to {start_time} in the main video")
-                                    except:
+                                        st.caption(f"Jump to {start_time} in the main video")
+                                    except Exception:
                                         st.warning("Video preview not available")
                                 else:
-                                    st.info("🎬 Snippet creation requires video URL")
-                        
+                                    st.info("Snippet creation requires video URL")
+
                         with col_download:
                             if snippet_created and os.path.exists(snippet_filename):
                                 with open(snippet_filename, "rb") as file:
                                     file_contents = file.read()
                                 st.download_button(
-                                    label=f"⬇️ Download",
+                                    label="Download",
                                     data=file_contents,
                                     file_name=snippet_filename,
                                     mime="video/mp4",
@@ -506,61 +554,113 @@ def display_video_analysis_section():
                                 )
                             else:
                                 st.button(
-                                    "🔄 Retry Snippet",
+                                    "Retry Snippet",
                                     key=f"retry_highlight_{i}",
                                     help="Try creating snippet again",
                                     disabled=not st.session_state.video_url
                                 )
-                        
+
                         st.markdown("---")
-                        
+
             except Exception as e:
                 st.error(f"Error generating highlights: {str(e)}")
-    
+
+    # Additional advanced insights: Topics and Entities
+    st.markdown("---")
+    st.subheader("Advanced Insights")
+    col_t1, col_t2 = st.columns([1, 1])
+    with col_t1:
+        if st.button("Generate Topics", key="gen_topics_btn"):
+            try:
+                with st.spinner("Extracting topics..."):
+                    client = TwelveLabs(api_key=API_KEY)
+                    st.session_state.topics_result = generate_topics(client, st.session_state.video_id)
+            except Exception as e:
+                st.error(f"Error extracting topics: {str(e)}")
+    with col_t2:
+        if st.button("Extract Entities", key="gen_entities_btn"):
+            try:
+                with st.spinner("Extracting entities..."):
+                    client = TwelveLabs(api_key=API_KEY)
+                    st.session_state.entities_result = generate_entities(client, st.session_state.video_id)
+            except Exception as e:
+                st.error(f"Error extracting entities: {str(e)}")
+
+    # Render Topics
+    if st.session_state.topics_result:
+        topics = st.session_state.topics_result.get('topics', [])
+        if topics:
+            st.markdown("### Topics")
+            for t in topics:
+                start = seconds_to_mmss(t.get('first_sec', 0))
+                end = seconds_to_mmss(t.get('last_sec', 0))
+                sal = f"{t.get('salience', 0)*100:.0f}%"
+                st.write(f"- **{t.get('name')}** (salience: {sal}) — {start} to {end}; keywords: {', '.join(t.get('keywords', []))}")
+        else:
+            st.info("No topics detected.")
+
+    # Render Entities grouped by type
+    if st.session_state.entities_result:
+        entities = st.session_state.entities_result.get('entities', [])
+        if entities:
+            st.markdown("### Entities")
+            by_type = {}
+            for e in entities:
+                by_type.setdefault(e.get('type', 'other'), []).append(e)
+            for typ, arr in by_type.items():
+                st.write(f"**{typ.title()}** ({len(arr)}):")
+                for e in arr[:10]:  # show up to 10 per type
+                    start = seconds_to_mmss(e.get('first_sec', 0))
+                    end = seconds_to_mmss(e.get('last_sec', 0))
+                    conf = f"{e.get('confidence', 0)*100:.0f}%"
+                    st.write(f"- {e.get('name')} (conf: {conf}, mentions: {e.get('mentions', 0)}) — {start} to {end}")
+        else:
+            st.info("No entities detected.")
+
     # Custom analysis section
-    st.subheader("🎯 Custom Analysis")
+    st.subheader("Custom Analysis")
     custom_prompt = st.text_area(
         "Enter custom analysis prompt:",
         placeholder="e.g., 'Analyze the emotional tone of this video', 'List all products mentioned', 'Identify key learning objectives'",
         height=100
     )
-    
+
     col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("🔍 Analyze", key="custom_analysis_btn", disabled=not custom_prompt):
+        if st.button("Analyze", key="custom_analysis_btn", disabled=not custom_prompt):
             try:
                 with st.spinner("Performing custom analysis..."):
                     client = TwelveLabs(api_key=API_KEY)
                     analysis_result = generate_open_analysis(
-                        client, 
-                        st.session_state.video_id, 
-                        custom_prompt, 
+                        client,
+                        st.session_state.video_id,
+                        custom_prompt,
                         temperature=0.3
                     )
-                    
-                    st.subheader("🎯 Custom Analysis Results")
+
+                    st.subheader("Custom Analysis Results")
                     st.write(analysis_result['analysis'])
-                    
+
             except Exception as e:
                 st.error(f"Error performing custom analysis: {str(e)}")
-    
+
     with col2:
-        st.info("💡 **Analysis Tips:**\n- Be specific in your prompts\n- Ask about content, themes, or patterns\n- Request summaries for specific audiences\n- Analyze emotional tone or sentiment")
+        st.info("**Analysis Tips:**\n- Be specific in your prompts\n- Ask about content, themes, or patterns\n- Request summaries for specific audiences\n- Analyze emotional tone or sentiment")
 
 
 def display_qa_interface():
     """Main QA interface display function."""
-    st.subheader("🤖 Video Q&A Interface")
+    st.subheader("Video Q&A Interface")
     st.write("Ask questions about your videos and get relevant segments!")
     
     # Add helpful info about TwelveLabs search
-    with st.expander("ℹ️ How TwelveLabs Video Search Works"):
+    with st.expander("How TwelveLabs Video Search Works"):
         st.markdown("""
         **TwelveLabs Built-in Intelligence:**
         
-        🧠 **No Manual Setup Required**: TwelveLabs automatically creates embeddings and vector indices when you upload videos
+        **No Manual Setup Required**: TwelveLabs automatically creates embeddings and vector indices when you upload videos
         
-        🔍 **Multi-modal Search**: Searches across:
+        **Multi-modal Search**: Searches across:
         - **Visual content**: Objects, scenes, actions, people
         - **Audio content**: Speech, music, sounds, conversations  
         - **Text content**: Any text visible in the video
@@ -578,10 +678,10 @@ def display_qa_interface():
         - "Locate discussions about pricing"
         
         **Multi-Video Benefits:**
-        - ✅ Find content across your entire video library
-        - ✅ Compare similar content between videos
-        - ✅ Discover patterns across different videos
-        - ✅ Access comprehensive search results
+        - Find content across your entire video library
+        - Compare similar content between videos
+        - Discover patterns across different videos
+        - Access comprehensive search results
         """)
     
     # QA Search Interface
@@ -593,7 +693,7 @@ def display_qa_interface():
     
     # Display created QA snippets
     if st.session_state.qa_snippets:
-        st.subheader("📹 Q&A Video Snippets")
+        st.subheader("Q&A Video Snippets")
         for index, (file_name, query, snippet_info) in enumerate(st.session_state.qa_snippets):
             display_qa_snippet(file_name, query, snippet_info, index)
         
@@ -610,11 +710,11 @@ def display_qa_interface():
     # Show helpful message when no video is selected but interface is accessible
     if not st.session_state.video_id:
         st.info("""
-        💡 **Pro Tip**: Even without a specific video selected, you can:
+        **Pro Tip**: Even without a specific video selected, you can:
         - Search across **all videos in your index** using the "All videos in index" option
         - Find content from any video in your TwelveLabs library
-        - Upload a new video in the **"📤 Upload Video"** tab
-        - Select an existing video in the **"📂 Select Existing"** tab
+        - Upload a new video in the **"Upload Video"** tab
+        - Select an existing video in the **"Select Existing"** tab
         """)
 
 
@@ -776,9 +876,9 @@ def main():
     try:
         # Test if we can create a TwelveLabs client
         client = TwelveLabs(api_key=API_KEY)
-        st.success("✅ TwelveLabs API configuration is valid!")
+        st.success("TwelveLabs API configuration is valid!")
     except Exception as e:
-        st.error(f"❌ TwelveLabs API configuration error: {str(e)}")
+        st.error(f"TwelveLabs API configuration error: {str(e)}")
         st.info("""
         **Setup Instructions:**
         1. Copy `.env.example` to `.env`
@@ -790,7 +890,7 @@ def main():
         return
     
     # Main navigation tabs
-    tab1, tab2, tab3 = st.tabs(["**📤 Upload Video**", "**📂 Select Existing**", "**🤖 Video Q&A**"])
+    tab1, tab2, tab3 = st.tabs(["**Upload Video**", "**Select Existing**", "**Video Q&A**"])
 
     with tab1:
         upload_and_process_video()
