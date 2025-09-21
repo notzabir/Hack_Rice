@@ -3,6 +3,8 @@ import tempfile
 import os
 from datetime import datetime
 from twelvelabs import TwelveLabs
+import streamlit_auth0_component as sac
+from auth_config import AUTH0_DOMAIN, AUTH0_CLIENT_ID
 
 try:
     from utils import (
@@ -24,6 +26,167 @@ except Exception as e:
     st.stop()
 
 import uuid 
+
+def log_error(error_type, error_message, context=None, recovery_suggestions=None):
+    error_entry = {
+        'timestamp': st.session_state.get('current_time', 'unknown'),
+        'type': error_type,
+        'message': error_message,
+        'context': context,
+        'recovery_suggestions': recovery_suggestions or []
+    }
+    st.session_state.error_log.append(error_entry)
+    st.session_state.last_error = error_entry
+    return error_entry
+
+def display_enhanced_error(error_type, error_message, recovery_suggestions=None):
+    st.error(f"Error: {error_type} - {error_message}")
+    
+    if recovery_suggestions:
+        with st.expander("Troubleshooting & Recovery Options"):
+            for i, suggestion in enumerate(recovery_suggestions, 1):
+                st.write(f"{i}. {suggestion}")
+    
+    log_error(error_type, error_message, recovery_suggestions=recovery_suggestions)
+
+def get_recovery_suggestions(error_type):
+    suggestions = {
+        'upload_error': [
+            "Check if the video file is not corrupted",
+            "Ensure the video format is supported (MP4, AVI, MOV)",
+            "Verify the video file size is under 1GB",
+            "Try uploading a smaller video segment first",
+            "Check your internet connection"
+        ],
+        'api_error': [
+            "Check your TwelveLabs API key in the .env file",
+            "Verify your INDEX_ID is correct",
+            "Ensure you have sufficient API credits",
+            "Try refreshing the page",
+            "Contact support if the issue persists"
+        ],
+        'processing_error': [
+            "Wait a few minutes and try again",
+            "Check if the video is still being processed",
+            "Try with a shorter video",
+            "Verify your internet connection",
+            "Clear browser cache and reload"
+        ],
+        'search_error': [
+            "Wait for video indexing to complete",
+            "Try a different search query",
+            "Check if the video was uploaded successfully",
+            "Refresh the page and try again"
+        ]
+    }
+    return suggestions.get(error_type, ["Try refreshing the page", "Contact support if the issue persists"])
+
+def format_timestamps_for_youtube(timestamps):
+    if not timestamps:
+        return ""
+    
+    lines = timestamps.strip().split('\n')
+    youtube_format = []
+    
+    for line in lines:
+        if '-' in line:
+            time_part, title_part = line.split('-', 1)
+            time_part = time_part.strip()
+            title_part = title_part.strip()
+            youtube_format.append(f"{time_part} - {title_part}")
+    
+    return '\n'.join(youtube_format)
+
+def export_to_json(data, filename="export"):
+    import json
+    from datetime import datetime
+    
+    export_data = {
+        'export_timestamp': datetime.now().isoformat(),
+        'video_id': st.session_state.get('video_id'),
+        'timestamps': st.session_state.get('timestamps'),
+        'qa_results': data.get('qa_results', []),
+        'chapters': data.get('chapters', []),
+        'highlights': data.get('highlights', [])
+    }
+    
+    return json.dumps(export_data, indent=2)
+
+def export_to_csv(data, filename="export"):
+    import csv
+    import io
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    writer.writerow(['Type', 'Timestamp', 'Title/Query', 'Content', 'Confidence'])
+    
+    if st.session_state.get('timestamps'):
+        for line in st.session_state.timestamps.split('\n'):
+            if '-' in line:
+                time_part, title_part = line.split('-', 1)
+                writer.writerow(['Timestamp', time_part.strip(), title_part.strip(), '', ''])
+    
+    for result in data.get('qa_results', []):
+        writer.writerow([
+            'QA Result', 
+            f"{result.get('start', '')}-{result.get('end', '')}", 
+            result.get('query', ''), 
+            result.get('text', ''), 
+            result.get('confidence', '')
+        ])
+    
+    return output.getvalue()
+
+def create_export_button(data, export_type="youtube", label="Export"):
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        if export_type == "youtube":
+            content = format_timestamps_for_youtube(st.session_state.get('timestamps', ''))
+            st.text_area("YouTube Format (Copy this to your video description):", 
+                        value=content, height=100, key=f"export_youtube_{uuid.uuid4()}")
+        elif export_type == "json":
+            content = export_to_json(data)
+            st.text_area("JSON Export:", value=content, height=200, key=f"export_json_{uuid.uuid4()}")
+        elif export_type == "csv":
+            content = export_to_csv(data)
+            st.text_area("CSV Export:", value=content, height=200, key=f"export_csv_{uuid.uuid4()}")
+    
+    with col2:
+        if st.button(f"Copy {export_type.upper()}", key=f"copy_{export_type}_{uuid.uuid4()}"):
+            st.components.v1.html(f"""
+                <script>
+                navigator.clipboard.writeText(`{content.replace('`', '\\`')}`).then(function() {{
+                    console.log('Copied to clipboard!');
+                }});
+                </script>
+            """, height=0)
+            st.success(f"Copied {export_type.upper()} format to clipboard!")
+            
+            st.session_state.export_history.append({
+                'timestamp': str(datetime.now()),
+                'type': export_type,
+                'video_id': st.session_state.get('video_id')
+            })
+    
+    with col3:
+        if export_type == "json":
+            st.download_button(
+                label=f"Download JSON",
+                data=content,
+                file_name=f"video_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                key=f"download_json_{uuid.uuid4()}"
+            )
+        elif export_type == "csv":
+            st.download_button(
+                label=f"Download CSV",
+                data=content,
+                file_name=f"video_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                key=f"download_csv_{uuid.uuid4()}"
+            ) 
 
 def log_error(error_type, error_message, context=None, recovery_suggestions=None):
     error_entry = {
@@ -926,7 +1089,7 @@ def process_batch_queue():
             item['error'] = str(e)
             display_enhanced_error('Batch Processing Error', str(e), 
                                  get_recovery_suggestions('processing_error'))
-    
+
     st.session_state.batch_processing = False
 
 def display_batch_queue():
@@ -1218,7 +1381,7 @@ def display_timestamps_and_segments():
                 st.success("All segment files have been cleared.")
                 st.experimental_rerun()
 
-def main():
+def run_app():
     # Configuration status check
     try:
         # Test if we can create a TwelveLabs client
@@ -1250,6 +1413,32 @@ def main():
     
     # Display timestamps and segments (shown on all tabs when available)
     display_timestamps_and_segments()
+
+def main():
+    st.set_page_config(
+        page_title="🎬 HootQnA - AI Video Analysis Platform", 
+        page_icon="🎬",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+
+    # Auth0 login
+    auth_info = sac.login_button(
+        clientId=AUTH0_CLIENT_ID,
+        domain=AUTH0_DOMAIN,
+    )
+
+    if not auth_info:
+        st.warning("Please log in to access the application.")
+        st.info("This is a demo application. You can use a dummy email and password to log in if you don't have an account.")
+        st.stop()
+
+    st.sidebar.success(f"Welcome, {auth_info['name']}!")
+    
+    with st.sidebar:
+        sac.logout_button()
+
+    run_app()
 
 if __name__ == "__main__":
     main()
