@@ -186,251 +186,26 @@ def create_export_button(data, export_type="youtube", label="Export"):
                 key=f"download_csv_{uuid.uuid4()}"
             ) 
 
-st.set_page_config(page_title="YouTube Chapter Timestamp Generator", layout="wide")
+st.set_page_config(
+    page_title="🎬 HootQnA - AI Video Analysis Platform", 
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+def load_css(file_name):
+    with open(file_name) as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+load_css("style.css")
 
 st.markdown("""
-<style>
-[data-testid="stAppViewContainer"] {
-    background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-    min-height: 100vh;
-}
-
-[data-testid="stHeader"] {
-    background-color: rgba(0,0,0,0);
-}
-
-[data-testid="stToolbar"] {
-    right: 2rem;
-    background: transparent;
-}
-
-h1 {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif !important;
-    font-weight: 600 !important;
-    color: #1e3a8a !important;
-    letter-spacing: -0.02em !important;
-}
-
-.stButton > button {
-    background: linear-gradient(145deg, #3b82f6, #1d4ed8);
-    color: white;
-    border: none;
-    border-radius: 8px;
-    font-weight: 500;
-    padding: 0.5rem 1rem;
-    transition: all 0.2s ease;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-}
-
-.stButton > button:hover {
-    background: linear-gradient(145deg, #1d4ed8, #1e40af);
-    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-    transform: translateY(-1px);
-}
-
-.stSuccess {
-    background-color: #ecfdf5;
-    border: 1px solid #86efac;
-    border-radius: 8px;
-    color: #166534;
-}
-
-.stError {
-    background-color: #fef2f2;
-    border: 1px solid #fca5a5;
-    border-radius: 8px;
-    color: #dc2626;
-}
-
-.stInfo {
-    background-color: #eff6ff;
-    border: 1px solid #93c5fd;
-    border-radius: 8px;
-    color: #1e40af;
-}
-
-.stTabs [data-baseweb="tab-list"] button {
-    background-color: transparent;
-    border-radius: 8px 8px 0 0;
-    color: #6b7280;
-    font-weight: 500;
-    padding: 0.75rem 1.5rem;
-}
-
-.stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {
-    background-color: white;
-    color: #1e40af;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-}
-
-.streamlit-expanderHeader {
-    background-color: #f8fafc;
-    border-radius: 8px;
-    border: 1px solid #e2e8f0;
-}
-
-.stTextInput > div > div > input {
-    border-radius: 8px;
-    border: 1px solid #d1d5db;
-    background-color: white;
-}
-
-.stTextArea > div > div > textarea {
-    border-radius: 8px;
-    border: 1px solid #d1d5db;
-    background-color: white;
-}
-
-.stSelectbox > div > div > select {
-    border-radius: 8px;
-    border: 1px solid #d1d5db;
-    background-color: white;
-}
-
-.stProgress > div > div > div > div {
-    background-color: #3b82f6;
-    border-radius: 4px;
-}
-
-[data-testid="stVideo"] {
-    border-radius: 12px;
-    overflow: hidden;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-}
-
-.stCodeBlock {
-    border-radius: 8px;
-    border: 1px solid #e5e7eb;
-    background-color: #f9fafb;
-}
-
-.main .block-container {
-    padding-top: 2rem;
-    padding-bottom: 2rem;
-}
-
-.stContainer {
-    background-color: white;
-    border-radius: 12px;
-    padding: 1.5rem;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-    margin-bottom: 1rem;
-}
-
-.notification {
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    background: linear-gradient(145deg, #059669, #047857);
-    color: white;
-    padding: 12px 24px;
-    border-radius: 8px;
-    z-index: 1000;
-    animation: slideIn 0.3s ease-in-out;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    font-weight: 500;
-}
-
-@keyframes slideIn {
-    from { transform: translateX(100%); opacity: 0; }
-    to { transform: translateX(0); opacity: 1; }
-}
-
-.shortcut-hint {
-    font-size: 0.75em;
-    color: #6b7280;
-    margin-left: 8px;
-    background-color: #f3f4f6;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-family: monospace;
-}
-</style>
-
-<script>
-document.addEventListener('keydown', function(e) {
-    if (e.ctrlKey && e.key === 'u') {
-        e.preventDefault();
-        const uploadTab = document.querySelector('[data-testid="stTabs"] button');
-        if (uploadTab) uploadTab.click();
-        showNotification('Upload tab activated');
-    }
-    
-    if (e.ctrlKey && e.key === 's') {
-        e.preventDefault();
-        const searchInputs = document.querySelectorAll('input[type="text"]');
-        if (searchInputs.length > 0) {
-            searchInputs[searchInputs.length - 1].focus();
-            showNotification('Search focused');
-        }
-    }
-    
-    if (e.ctrlKey && e.key === 'e') {
-        e.preventDefault();
-        const exportButtons = document.querySelectorAll('button[data-testid="baseButton-secondary"]');
-        const exportButton = Array.from(exportButtons).find(btn => btn.textContent.includes('Export'));
-        if (exportButton) {
-            exportButton.click();
-            showNotification('Export triggered');
-        }
-    }
-    
-    if (e.ctrlKey && e.key === 'q') {
-        e.preventDefault();
-        const tabs = document.querySelectorAll('[data-testid="stTabs"] button');
-        if (tabs.length >= 3) {
-            tabs[2].click();
-            showNotification('Q&A tab activated');
-        }
-    }
-    
-    if (e.key === 'Escape') {
-        const searchInputs = document.querySelectorAll('input[type="text"]');
-        searchInputs.forEach(input => input.value = '');
-        showNotification('Search cleared');
-    }
-});
-
-function showNotification(message) {
-    const existing = document.querySelector('.notification');
-    if (existing) existing.remove();
-    
-    const notification = document.createElement('div');
-    notification.className = 'notification';
-    notification.textContent = message;
-    document.body.appendChild(notification);
-    
-    setTimeout(() => {
-        if (notification.parentNode) {
-            notification.parentNode.removeChild(notification);
-        }
-    }, 3000);
-}
-
-document.addEventListener('DOMContentLoaded', function() {
-    addShortcutHints();
-});
-
-function addShortcutHints() {
-    setTimeout(() => {
-        const buttons = document.querySelectorAll('button');
-        buttons.forEach(button => {
-            const text = button.textContent.toLowerCase();
-            if (text.includes('upload') && !button.querySelector('.shortcut-hint')) {
-                button.innerHTML += '<span class="shortcut-hint">Ctrl+U</span>';
-            } else if (text.includes('search') && !button.querySelector('.shortcut-hint')) {
-                button.innerHTML += '<span class="shortcut-hint">Ctrl+S</span>';
-            } else if (text.includes('export') && !button.querySelector('.shortcut-hint')) {
-                button.innerHTML += '<span class="shortcut-hint">Ctrl+E</span>';
-            }
-        });
-    }, 1000);
-}
-</script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
 """, unsafe_allow_html=True)
 
 # Streamlit Page Header
-st.markdown("<h1 style='text-align: center; color: #1f1f1f; font-weight: 600;'>HootQnA Video Analysis Platform</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center; color: #f8fafc; font-weight: 600;'>HootQnA AI Video Analysis Platform</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center; color: #666; font-size: 18px; margin-bottom: 2rem;'>Advanced video processing, timestamp generation, and intelligent content analysis</p>", unsafe_allow_html=True)
 
 # Keyboard shortcuts help
