@@ -31,10 +31,12 @@ if not INDEX_ID:
         "INDEX_ID=your_index_id_here"
     )
 
+# Convert seconds to MM:SS format and vice versa
 def seconds_to_mmss(seconds):
     minutes, seconds = divmod(int(seconds), 60)
     return f"{minutes:02d}:{seconds:02d}"
 
+# Convert MM:SS format to seconds
 def mmss_to_seconds(mmss):
     minutes, seconds = map(int, mmss.split(':'))
     return minutes * 60 + seconds
